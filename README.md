@@ -53,14 +53,21 @@ delivery timing.
 `amq wake` runs `<self> inject <pane_id> <payload>` per notification and
 reads `AMQ_INJECT_PROGRESS=<marker>` from the injector's stderr.
 
-| `herdr agent prompt` result | marker | exit | meaning |
+The injector first reads the agent's live status (`herdr agent get`) and
+only submits to a settled, input-ready agent.
+
+| observed | marker | exit | meaning |
 |---|---|---|---|
-| exit 0 | `accepted` | 0 | text + Enter written; cohort acknowledged (`--retry-until injected`) |
-| `agent_blocked` | `deferred` | 0 | agent is at an approval / question UI; keep the cohort, retry later |
+| status `idle` / `done` / `unknown`, prompt exit 0 | `accepted` | 0 | text + Enter written; cohort acknowledged (`--retry-until injected`) |
+| status `working` | `deferred` | 1 | agent mid-turn; amq retries on its ladder (5s base, 2m cap, no budget spent) |
+| status `blocked`, or prompt returns `agent_blocked` | `deferred` | 1 | approval / question UI; same ladder |
 | `agent_not_found`, `agent_prompt_stalled`, timeout, usage | `failed` | 1 | terminal for this unchanged cohort; a new inbox change re-arms |
 
-The injector never passes `--wait`, and its own timeout (4s) stays under
-`amq --inject-timeout` (5s) so AMQ always sees a marker rather than a kill.
+`deferred` **must** exit non-zero: amq's `classifyInjectViaResult` treats a
+deferred marker with exit 0 as `uncertain`, which is terminal and never
+replayed. The injector never passes `--wait`, and its own timeout (4s) stays
+under `amq --inject-timeout` (5s) so AMQ always sees a marker rather than a
+kill.
 
 ## Install
 
@@ -103,10 +110,7 @@ herdr plugin action invoke est9.amq-adapter.status
 
 ## Known gaps
 
-- Exit status for `deferred` is not documented by `amq wake --help`; the
-  adapter exits 0 with the marker. Verify against the amq source before
-  relying on `agent_blocked` retention.
-- No `working` gate: a notice is injected even while the agent is mid-turn
-  (Claude Code / Codex queue it). Matches the ghostty-bridge behavior orch
-  uses today; a `--defer-while-working` option is the obvious next step.
+- The status read and the prompt are two calls, so an agent that starts a
+  turn in between still receives the notice mid-turn (Claude Code / Codex
+  queue it; nothing is lost).
 - Windows is excluded: `Setsid` and process-group SIGTERM are Unix-only.

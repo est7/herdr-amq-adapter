@@ -45,7 +45,8 @@ func TestClassifyPromptResult(t *testing.T) {
 		exit   int
 	}{
 		{0, "", ProgressAccepted, "", 0},
-		{1, `{"error":{"code":"agent_blocked","message":"agent is blocked"},"id":"cli:agent:prompt"}`, ProgressDeferred, "agent_blocked", 0},
+		// deferred MUST exit non-zero: amq treats deferred+exit0 as uncertain (terminal).
+		{1, `{"error":{"code":"agent_blocked","message":"agent is blocked"},"id":"cli:agent:prompt"}`, ProgressDeferred, "agent_blocked", 1},
 		{1, `{"error":{"code":"agent_not_found","message":"agent target w1:p9 not found"},"id":"cli:agent:prompt"}`, ProgressFailed, "agent_not_found", 1},
 		{1, `{"error":{"code":"agent_prompt_stalled","message":"no activity"},"id":"x"}`, ProgressFailed, "agent_prompt_stalled", 1},
 		{2, "unknown option: --bogus", ProgressFailed, "exit_2", 1},
@@ -54,6 +55,20 @@ func TestClassifyPromptResult(t *testing.T) {
 		got := ClassifyPromptResult(c.rc, c.stderr)
 		if got.Progress != c.want || got.Code != c.code || got.ExitCode() != c.exit {
 			t.Errorf("rc=%d stderr=%q: got %+v want progress=%s code=%s exit=%d", c.rc, c.stderr, got, c.want, c.code, c.exit)
+		}
+	}
+}
+
+func TestGateOnStatus(t *testing.T) {
+	for _, st := range []string{"idle", "done", "unknown", ""} {
+		if _, ready := GateOnStatus(st); !ready {
+			t.Errorf("status %q must be ready", st)
+		}
+	}
+	for _, st := range []string{"working", "blocked"} {
+		out, ready := GateOnStatus(st)
+		if ready || out.Progress != ProgressDeferred || out.ExitCode() != 1 {
+			t.Errorf("status %q: got ready=%v %+v; want deferred exit 1", st, ready, out)
 		}
 	}
 }
