@@ -17,6 +17,10 @@ func TestDecide(t *testing.T) {
 		{"released", `{"event":"pane.agent_detected","data":{"pane_id":"w1:p2","workspace_id":"w1","released":true,"final_status":"done"}}`, ActionStop},
 		{"closed", `{"event":"pane.closed","data":{"pane_id":"w1:p2","workspace_id":"w1"}}`, ActionStop},
 		{"exited", `{"event":"pane.exited","data":{"pane_id":"w1:p2","workspace_id":"w1"}}`, ActionStop},
+		// wire form as herdr 0.9.1 actually emits it (snake_case EventKind)
+		{"detected-wire", `{"event":"pane_agent_detected","data":{"pane_id":"w1:p2","workspace_id":"w1","agent":"claude"}}`, ActionEnsure},
+		{"exited-wire", `{"event":"pane_exited","data":{"pane_id":"w1:p2","workspace_id":"w1"}}`, ActionStop},
+		{"closed-wire", `{"event":"pane_closed","data":{"pane_id":"w1:p2","workspace_id":"w1"}}`, ActionStop},
 		{"status", `{"event":"pane.agent_status_changed","data":{"pane_id":"w1:p2","workspace_id":"w1","agent_status":"idle"}}`, ActionNone},
 	}
 	for _, c := range cases {
@@ -73,25 +77,65 @@ func TestGateOnStatus(t *testing.T) {
 	}
 }
 
-func TestHandleRequiresName(t *testing.T) {
-	if _, ok := Handle(AgentInfo{PaneID: "w1:p1", Agent: str("claude")}); ok {
-		t.Error("unnamed agent must not be adopted")
+func TestChooseHandle(t *testing.T) {
+	taken := map[string]bool{"claude": true, "claude-2": true}
+	cases := []struct {
+		a    AgentInfo
+		want string
+	}{
+		{AgentInfo{Name: str("reviewer"), Agent: str("claude")}, "reviewer"}, // live name wins
+		{AgentInfo{Agent: str("codex")}, "codex"},
+		{AgentInfo{Agent: str("claude")}, "claude-3"},
+		{AgentInfo{Agent: str("Antigravity CLI")}, "antigravity-cli"},
+		{AgentInfo{}, "agent"},
 	}
-	if h, ok := Handle(AgentInfo{PaneID: "w1:p1", Agent: str("claude"), Name: str("reviewer")}); !ok || h != "reviewer" {
-		t.Errorf("named agent handle: got %q %v", h, ok)
+	for _, c := range cases {
+		if got := ChooseHandle(c.a, taken); got != c.want {
+			t.Errorf("%+v: got %q want %q", c.a, got, c.want)
+		}
+	}
+}
+
+func TestAddAgent(t *testing.T) {
+	in := []byte(`{"version":1,"created_utc":"x","agents":["codex"]}`)
+	out, changed, err := AddAgent(in, "claude")
+	if err != nil || !changed {
+		t.Fatalf("changed=%v err=%v", changed, err)
+	}
+	if string(out) != "{\n  \"agents\": [\n    \"claude\",\n    \"codex\"\n  ],\n  \"created_utc\": \"x\",\n  \"version\": 1\n}\n" {
+		t.Errorf("unexpected config: %s", out)
+	}
+	if _, changed, _ := AddAgent(out, "claude"); changed {
+		t.Error("re-adding must be a no-op")
+	}
+}
+
+func TestIdentityRenderAndNotice(t *testing.T) {
+	id := Identity{PaneID: "w1:p2", Handle: "claude", Root: "/tmp/it's here"}
+	want := "export AM_ROOT='/tmp/it'\\''s here'\nexport AM_ME='claude'\nexport HERDR_AMQ_PANE='w1:p2'\n"
+	if got := id.Render(); got != want {
+		t.Errorf("render:\n%q\nwant\n%q", got, want)
+	}
+	if p := IdentityPath("/cfg", "w1:p2"); p != "/cfg/panes/w1_p2.env" {
+		t.Errorf("path %q", p)
+	}
+	n := Notice("AMQ [1]: message from codex\n", id, "/cfg/panes/w1_p2.env")
+	if n != "AMQ [1]: message from codex — you are AMQ agent claude; to read and reply run: source '/cfg/panes/w1_p2.env' && amq drain" {
+		t.Errorf("notice %q", n)
 	}
 }
 
 func TestPlan(t *testing.T) {
 	live := []AgentInfo{
 		{PaneID: "w1:p1", Name: str("reviewer"), Agent: str("claude")},
-		{PaneID: "w1:p2", Agent: str("codex")}, // unnamed: never wanted
+		{PaneID: "w1:p2", Agent: str("codex")}, // unnamed but live: wanted (named at start)
 		{PaneID: "w1:p3", Name: str("impl"), Agent: str("codex")},
 		{PaneID: "w1:p4", Name: str("qa"), Agent: str("claude")},
+		{PaneID: "w1:p5", Agent: str("codex")}, // unnamed, no record: start
 	}
 	wakers := []WakerRecord{
 		{PaneID: "w1:p1", Handle: "reviewer", PID: 100}, // alive, matches: keep
-		{PaneID: "w1:p2", Handle: "old", PID: 101},      // pane now unnamed: stop
+		{PaneID: "w1:p2", Handle: "codex", PID: 101},    // alive, unnamed agent: keep (name unknown, no mismatch)
 		{PaneID: "w1:p3", Handle: "impl", PID: 102},     // dead: forget + restart
 		{PaneID: "w1:p4", Handle: "qa-old", PID: 103},   // renamed: stop + restart
 		{PaneID: "w1:p9", Handle: "gone", PID: 104},     // pane vanished: stop
@@ -107,18 +151,18 @@ func TestPlan(t *testing.T) {
 	for _, a := range plan.Start {
 		started = append(started, a.PaneID)
 	}
-	if want := []string{"w1:p2", "w1:p3", "w1:p4", "w1:p9"}; !reflect.DeepEqual(stopped, want) {
+	if want := []string{"w1:p3", "w1:p4", "w1:p9"}; !reflect.DeepEqual(stopped, want) {
 		t.Errorf("stop: got %v want %v", stopped, want)
 	}
-	if want := []string{"w1:p3", "w1:p4"}; !reflect.DeepEqual(started, want) {
+	if want := []string{"w1:p3", "w1:p4", "w1:p5"}; !reflect.DeepEqual(started, want) {
 		t.Errorf("start: got %v want %v", started, want)
 	}
 }
 
 func TestAmqWakeArgsContract(t *testing.T) {
-	got := AmqWakeArgs("/opt/adapter", "reviewer", "w1:p1")
-	want := []string{"wake", "--me", "reviewer", "--inject-via", "/opt/adapter",
-		"--inject-arg", "inject", "--inject-arg", "w1:p1",
+	got := AmqWakeArgs("/opt/adapter", "reviewer", "w1:p1", "/state/amq-root")
+	want := []string{"wake", "--root", "/state/amq-root", "--me", "reviewer", "--inject-via", "/opt/adapter",
+		"--inject-arg", "inject", "--inject-arg", "w1:p1", "--inject-arg", "reviewer", "--inject-arg", "/state/amq-root",
 		"--retry-until", "injected", "--interrupt-cmd", "none", "--no-self-upgrade"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v", got)

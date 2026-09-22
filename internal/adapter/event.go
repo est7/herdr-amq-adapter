@@ -6,6 +6,7 @@ package adapter
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // Event mirrors Herdr's EventEnvelope as delivered in HERDR_PLUGIN_EVENT_JSON.
@@ -71,9 +72,13 @@ type Action struct {
 
 // Decide maps a Herdr event to an adapter action. Only agent appearance and
 // pane/agent departure matter; status changes are left to amq's own retry loop.
+//
+// Herdr serialises EventKind in the envelope as snake_case ("pane_exited")
+// while manifests and HERDR_PLUGIN_EVENT use the dotted form ("pane.exited");
+// both are accepted.
 func Decide(ev Event) Action {
-	switch ev.Event {
-	case "pane.agent_detected":
+	switch strings.ReplaceAll(ev.Event, "_", ".") {
+	case "pane.agent.detected", "pane.agent_detected":
 		if ev.Data.Released {
 			return Action{ActionStop, ev.Data.PaneID, "agent released"}
 		}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 )
 
@@ -100,4 +101,16 @@ func (h Herdr) Prompt(target, text string, timeout time.Duration) (Outcome, erro
 		return Outcome{Progress: ProgressFailed, Code: "timeout", Note: "herdr agent prompt exceeded " + timeout.String()}, nil
 	}
 	return ClassifyPromptResult(rc, errs), nil
+}
+
+// AgentRename assigns a Herdr live name to the agent hosted by target.
+func (h Herdr) AgentRename(ctx context.Context, target, name string) error {
+	_, errs, rc, err := h.run(ctx, "agent", "rename", target, name)
+	if err != nil {
+		return fmt.Errorf("herdr agent rename: %w", err)
+	}
+	if rc != 0 {
+		return fmt.Errorf("herdr agent rename %s %s rc=%d: %s", target, name, rc, strings.TrimSpace(errs))
+	}
+	return nil
 }

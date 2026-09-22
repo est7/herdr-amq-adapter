@@ -17,17 +17,21 @@ type WakerSpec struct {
 	LogDir  string
 	Agent   AgentInfo
 	Handle  string
+	Root    string // shared amq root the waker watches
 }
 
 // AmqWakeArgs is the pure argv builder; kept separate so the contract with
 // `amq wake --inject-via` is testable without spawning.
-func AmqWakeArgs(selfBin, handle, paneID string) []string {
+func AmqWakeArgs(selfBin, handle, paneID, root string) []string {
 	return []string{
 		"wake",
+		"--root", root,
 		"--me", handle,
 		"--inject-via", selfBin,
 		"--inject-arg", "inject",
 		"--inject-arg", paneID,
+		"--inject-arg", handle,
+		"--inject-arg", root,
 		"--retry-until", "injected",
 		"--interrupt-cmd", "none",
 		"--no-self-upgrade",
@@ -35,8 +39,7 @@ func AmqWakeArgs(selfBin, handle, paneID string) []string {
 }
 
 // Spawn starts the waker detached: own session, stdio to a log file, cwd set
-// to the agent's cwd so amq resolves AM_ROOT exactly as the agent's own
-// shell did. It must not inherit the hook's pipes, or Herdr's hook reader
+// to the agent's cwd (the root is passed explicitly). It must not inherit the hook's pipes, or Herdr's hook reader
 // would block until the waker exits and hold an in-flight slot forever.
 func Spawn(spec WakerSpec) (WakerRecord, error) {
 	if err := os.MkdirAll(spec.LogDir, 0o755); err != nil {
@@ -50,7 +53,7 @@ func Spawn(spec WakerSpec) (WakerRecord, error) {
 	defer logf.Close()
 	fmt.Fprintf(logf, "\n=== %s spawn handle=%s pane=%s cwd=%s\n", time.Now().Format(time.RFC3339), spec.Handle, spec.Agent.PaneID, spec.Agent.Cwd)
 
-	cmd := exec.Command(spec.AmqBin, AmqWakeArgs(spec.SelfBin, spec.Handle, spec.Agent.PaneID)...)
+	cmd := exec.Command(spec.AmqBin, AmqWakeArgs(spec.SelfBin, spec.Handle, spec.Agent.PaneID, spec.Root)...)
 	cmd.Dir = spec.Agent.Cwd
 	cmd.Stdin = nil
 	cmd.Stdout = logf
@@ -67,6 +70,7 @@ func Spawn(spec WakerSpec) (WakerRecord, error) {
 		Handle:      spec.Handle,
 		PID:         pid,
 		Cwd:         spec.Agent.Cwd,
+		Root:        spec.Root,
 		StartedUnix: time.Now().Unix(),
 	}, nil
 }
