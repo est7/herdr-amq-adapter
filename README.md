@@ -19,14 +19,19 @@ agent A pane ──amq send --to claude──▶ shared AMQ root ──▶ amq w
 ## Install
 
 ```bash
-herdr plugin install est9/herdr-amq-adapter        # builds with `go build` on install
+herdr plugin install est7/herdr-amq-adapter        # builds with `go build` on install
 # or, for development:
 go build -o bin/herdr-amq-adapter ./cmd/herdr-amq-adapter && herdr plugin link "$PWD"
 ```
 
 Requires Herdr ≥ 0.9.0 and `amq` on the PATH Herdr's server sees (or `AMQ_BIN`).
-Then give your agents the companion skill in `skills/herdr-amq-adapter/` (this
-repo is a skill source; symlink or install it for Claude Code / Codex / pi).
+Then give your agents the companion skill. This repo is a skill source with
+the standard `skills/<name>/SKILL.md` layout, so any skills manager that
+reads that layout can install it; the manual form is:
+
+```bash
+ln -s "$PWD/skills/herdr-amq-adapter" ~/.claude/skills/herdr-amq-adapter   # Claude Code
+```
 
 ## What it does, zero-config
 

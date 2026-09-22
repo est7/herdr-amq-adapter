@@ -21,7 +21,7 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/est9/herdr-amq-adapter/internal/adapter"
+	"github.com/est7/herdr-amq-adapter/internal/adapter"
 )
 
 const promptTimeout = 4 * time.Second // < amq --inject-timeout (5s)
