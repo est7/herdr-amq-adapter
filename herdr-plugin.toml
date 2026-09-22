@@ -1,0 +1,35 @@
+id = "est9.amq-adapter"
+name = "AMQ Adapter"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+description = "Agents in Herdr panes message each other over AMQ: one amq waker per named agent, delivery via `herdr agent prompt`."
+platforms = ["linux", "macos"]
+
+[[build]]
+command = ["go", "build", "-o", "bin/herdr-amq-adapter", "./cmd/herdr-amq-adapter"]
+
+# Startup: reconcile waker inventory against live named agents.
+[[startup]]
+command = ["bin/herdr-amq-adapter", "reconcile"]
+
+[[events]]
+on = "pane.agent_detected"
+command = ["bin/herdr-amq-adapter", "hook"]
+
+[[events]]
+on = "pane.closed"
+command = ["bin/herdr-amq-adapter", "hook"]
+
+[[events]]
+on = "pane.exited"
+command = ["bin/herdr-amq-adapter", "hook"]
+
+[[actions]]
+id = "reconcile"
+title = "AMQ: reconcile wakers"
+command = ["bin/herdr-amq-adapter", "reconcile"]
+
+[[actions]]
+id = "status"
+title = "AMQ: waker status"
+command = ["bin/herdr-amq-adapter", "status"]
