@@ -39,7 +39,7 @@ source ~/.config/herdr/plugins/config/est7.amq-adapter/panes/"${HERDR_PANE_ID//:
 Read every message it prints, act on it, then reply in the same thread:
 
 ```bash
-source … && amq reply <message-id> --body "<your answer>"
+source … && amq reply --id <message-id> --body "<your answer>"
 ```
 
 Reply once per message, inline with `--body`; do not write the answer to a
@@ -55,6 +55,11 @@ source … && amq send --to codex --subject "<short subject>" --body "<request>"
 Handles are the names in Herdr's agent sidebar. A send returns immediately;
 the peer is woken by the plugin and answers with `amq reply`, which wakes you.
 Use `amq thread <thread-id>` to review an exchange.
+
+For a multi-round exchange you drive yourself (adversarial review with a
+fix loop, single audit, test-hardening attack, or a debate between peers),
+read `references/patterns.md`: it holds the role prompts, verdict markers,
+and round bounds for each.
 
 ## Rules
 
