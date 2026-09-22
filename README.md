@@ -109,13 +109,53 @@ reply. Inspect with `herdr plugin action invoke est7.amq-adapter.status` and
 - `cmd/herdr-amq-adapter/` — `hook`, `reconcile`, `inject`, `status`.
 - `skills/herdr-amq-adapter/SKILL.md` — the agent-facing prompt contract.
 
+## Agents on other machines
+
+Every machine keeps its own root and its own agents; there is no shared or
+remote root. Cross-machine mail rides on [amq-bridge](https://github.com/avivsinai/agent-message-queue/tree/main/cmd/amq-bridge),
+AMQ's signed, deduplicated courier, and this plugin only provisions and
+drives it:
+
+- a remote agent is a local **alias mailbox** `<host>-<agent>` (`heping-codex`);
+  `amq send --to heping-codex` is all an agent does;
+- `bridge run` (started by every reconcile once paired) re-addresses mail in
+  alias mailboxes (`from` becomes the alias the peer knows the sender by,
+  `mac-claude-2`), hands it to `amq-bridge enqueue`, pushes and polls a
+  **rendezvous** (a loopback blob store this plugin serves on one host and
+  the other reaches through an SSH tunnel), and applies inbound envelopes
+  into the real agent's inbox, where the ordinary waker rings the doorbell;
+- the dialing side syncs agent inventories both ways over SSH every 30s, so
+  alias mailboxes appear and disappear with the agents.
+
+Pair from the machine that can SSH to the other (the peer needs Herdr with
+this plugin linked, `amq` and `amq-bridge` installed; the adapter binary is
+copied over when missing):
+
+```bash
+herdr-amq-adapter peer add --ssh remote_heping --label heping --me mac   # rendezvous served by heping
+herdr-amq-adapter bridge status
+```
+
+Host aliases (`--me`, `--label`/`--host`) are bridge identities: they name
+the Ed25519 keys both sides trust and prefix every alias mailbox. Changing
+one means pairing again.
+
+Replies: a bridged message is stored under a transfer file name, and amq
+0.80 resolves `amq reply --id` by file name, so replying to a
+`<host>-<agent>` sender needs `amq send --to <sender> --thread <thread>`
+instead. Thread ids survive the hop, so `amq thread --id` shows the whole
+exchange on both machines.
+
 ## Known gaps
 
 - Status read and prompt are two calls; an agent that starts a turn in
   between gets the notice queued mid-turn (nothing is lost).
 - One shared root per user, not per project; handles are global across
   Herdr workspaces.
-- Unix only (`setsid`, process-group SIGTERM).
+- Unix only (`setsid`).
+- Bridge: one rendezvous per federation, served by one host; a peer that
+  cannot be dialed from the rendezvous host must dial it. Alias mailbox
+  liveness in `amq who` reflects the route, not the remote agent.
 - A parked record (agent released, pane open) is forgotten by `reconcile`
   if the pane still hosts no agent at that moment, so the sticky handle does
   not survive a Herdr restart that reconciles before agents are relaunched.

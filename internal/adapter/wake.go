@@ -84,12 +84,13 @@ func (t WakeTarget) retireArgs() []string {
 
 // WakeState is one observation of a handle's waker.
 type WakeState struct {
-	Status     string // valid | stale | missing | other amq statuses
-	Live       bool
-	PID        int
-	Generation string
-	Target     WakeTarget
-	HasTarget  bool
+	Status       string // valid | stale | missing | other amq statuses
+	Live         bool
+	PID          int
+	Generation   string
+	TargetDigest string
+	Target       WakeTarget
+	HasTarget    bool
 }
 
 // ParseWakeCheck decodes `amq wake check --json --json-schema 2`.
@@ -97,10 +98,11 @@ func ParseWakeCheck(js []byte) (WakeState, error) {
 	var doc struct {
 		Schema int `json:"schema"`
 		Wake   struct {
-			Status     string  `json:"status"`
-			Live       bool    `json:"live"`
-			PID        *int    `json:"pid"`
-			Generation *string `json:"generation"`
+			Status       string  `json:"status"`
+			Live         bool    `json:"live"`
+			PID          *int    `json:"pid"`
+			Generation   *string `json:"generation"`
+			TargetDigest *string `json:"target_digest"`
 		} `json:"wake"`
 	}
 	if err := json.Unmarshal(js, &doc); err != nil {
@@ -115,6 +117,9 @@ func ParseWakeCheck(js []byte) (WakeState, error) {
 	}
 	if doc.Wake.Generation != nil {
 		st.Generation = *doc.Wake.Generation
+	}
+	if doc.Wake.TargetDigest != nil {
+		st.TargetDigest = *doc.Wake.TargetDigest
 	}
 	return st, nil
 }
@@ -135,21 +140,46 @@ func ReadWakeTarget(root, handle string) (WakeTarget, bool, error) {
 	return t, true, nil
 }
 
-// WakeCheck observes the handle's waker without mutating anything.
+// WakeCheck observes the handle's waker without mutating anything. The
+// generation and the saved target come from two reads, so the target read
+// is fenced by a check on either side: a replacement always publishes a
+// new generation and target digest, and a snapshot whose two checks
+// disagree is discarded and retried.
 func WakeCheck(ctx context.Context, amqBin, root, handle string) (WakeState, error) {
+	var last error
+	for attempt := 0; attempt < 4; attempt++ {
+		before, err := wakeCheckOnce(ctx, amqBin, root, handle)
+		if err != nil {
+			return WakeState{}, err
+		}
+		target, hasTarget, err := ReadWakeTarget(root, handle)
+		if err != nil {
+			return WakeState{}, err
+		}
+		after, err := wakeCheckOnce(ctx, amqBin, root, handle)
+		if err != nil {
+			return WakeState{}, err
+		}
+		if before.Generation == after.Generation && before.TargetDigest == after.TargetDigest && before.Status == after.Status {
+			before.Target, before.HasTarget = target, hasTarget
+			return before, nil
+		}
+		last = fmt.Errorf("wake state for %s changed during observation (%s/%s -> %s/%s)", handle, before.Status, before.Generation, after.Status, after.Generation)
+		select {
+		case <-ctx.Done():
+			return WakeState{}, last
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	return WakeState{}, last
+}
+
+func wakeCheckOnce(ctx context.Context, amqBin, root, handle string) (WakeState, error) {
 	out, err := runAmq(ctx, amqBin, "wake", "check", "--root", root, "--me", handle, "--json", "--json-schema", "2")
 	if err != nil {
 		return WakeState{}, err
 	}
-	st, err := ParseWakeCheck(out)
-	if err != nil {
-		return WakeState{}, err
-	}
-	st.Target, st.HasTarget, err = ReadWakeTarget(root, handle)
-	if err != nil {
-		return WakeState{}, err
-	}
-	return st, nil
+	return ParseWakeCheck(out)
 }
 
 // WakeDecision is what ensure must do for a handle given its observed waker
@@ -199,15 +229,20 @@ func DecideWake(st WakeState, want WakeTarget) WakeDecision {
 // WakeRetire stops the waker whose saved target and generation are exactly
 // the observed ones. amq refuses when either changed since the observation,
 // so a replacement published in between is never retired by mistake. A
-// missing lock is not an error: there is nothing to retire.
+// missing lock is not an error: there is nothing to retire. A lock without
+// a generation cannot be fenced and is never retired by this plugin.
 func WakeRetire(ctx context.Context, amqBin, root, handle string, st WakeState) error {
-	if st.Status == "missing" || !st.HasTarget {
+	if st.Status == "missing" {
 		return nil
 	}
-	args := append([]string{"wake", "retire", "--root", root, "--me", handle, "--json"}, st.Target.retireArgs()...)
-	if st.Generation != "" {
-		args = append(args, "--if-generation", st.Generation)
+	if !st.HasTarget {
+		return fmt.Errorf("wake lock for %s has no saved target; refusing an unidentified retire", handle)
 	}
+	if st.Generation == "" {
+		return fmt.Errorf("wake lock for %s has no generation; refusing an unfenced retire", handle)
+	}
+	args := append([]string{"wake", "retire", "--root", root, "--me", handle, "--json"}, st.Target.retireArgs()...)
+	args = append(args, "--if-generation", st.Generation)
 	out, err := runAmq(ctx, amqBin, args...)
 	status, reason := parseStatusReason(out)
 	if status == "retired" {

@@ -4,6 +4,7 @@
 //	reconcile  — [[startup]] / action: diff live agents vs recorded wakers
 //	inject     — amq --inject-via target: gate on status, `herdr agent prompt`
 //	status     — action: print the waker inventory
+//	rendezvous — serve the amq-bridge courier blob store on loopback
 //
 // Adoption is zero-config: an unnamed agent is named after its kind
 // (claude, codex-2, …) via `herdr agent rename`; that name is its AMQ handle.
@@ -14,7 +15,10 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,6 +26,7 @@ import (
 	"time"
 
 	"github.com/est7/herdr-amq-adapter/internal/adapter"
+	"github.com/est7/herdr-amq-adapter/internal/rendezvous"
 )
 
 const promptTimeout = 4 * time.Second // < amq --inject-timeout (5s)
@@ -41,6 +46,12 @@ func main() {
 		os.Exit(runInject(os.Args[2:]))
 	case "status":
 		err = runStatus()
+	case "rendezvous":
+		err = runRendezvous(os.Args[2:])
+	case "bridge":
+		err = runBridge(os.Args[2:])
+	case "peer":
+		err = runPeer(os.Args[2:])
 	default:
 		usage()
 		os.Exit(2)
@@ -52,24 +63,35 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: herdr-amq-adapter hook|reconcile|status|inject <pane_id> <handle> <root> <payload>")
+	fmt.Fprintln(os.Stderr, "usage: herdr-amq-adapter hook|reconcile|status|inject <pane_id> <handle> <root> <payload>|rendezvous --listen <addr> --dir <dir>|bridge run|ensure|status|peer add|accept|agents|aliases")
 }
 
 type env struct {
 	herdr     adapter.Herdr
 	amq       string
+	bridgeBin string // amq-bridge; empty when not installed
 	self      string
 	store     *adapter.Store
+	stateDir  string
 	logs      string
 	root      string
 	configDir string
 }
 
+const pluginID = "est7.amq-adapter"
+
+// loadEnv reads the plugin runtime context. Outside a Herdr hook (a peer
+// driving this binary over SSH) the dirs fall back to Herdr's fixed
+// per-user layout for this plugin id.
 func loadEnv() (env, error) {
 	stateDir := os.Getenv("HERDR_PLUGIN_STATE_DIR")
 	configDir := os.Getenv("HERDR_PLUGIN_CONFIG_DIR")
+	home, _ := os.UserHomeDir()
+	if stateDir == "" {
+		stateDir = filepath.Join(home, ".local", "state", "herdr", "plugins", pluginID)
+	}
 	if configDir == "" {
-		return env{}, errors.New("HERDR_PLUGIN_CONFIG_DIR is not set")
+		configDir = filepath.Join(home, ".config", "herdr", "plugins", "config", pluginID)
 	}
 	store, err := adapter.NewStore(stateDir)
 	if err != nil {
@@ -79,22 +101,40 @@ func loadEnv() (env, error) {
 	if err != nil {
 		return env{}, err
 	}
-	amq := os.Getenv("AMQ_BIN")
-	if amq == "" {
-		amq, err = exec.LookPath("amq")
-		if err != nil {
-			return env{}, errors.New("amq not found on PATH (set AMQ_BIN)")
-		}
+	amq, err := findBin("AMQ_BIN", "amq", home)
+	if err != nil {
+		return env{}, err
 	}
+	bridgeBin, _ := findBin("AMQ_BRIDGE_BIN", "amq-bridge", home)
 	return env{
 		herdr:     adapter.HerdrFromEnv(),
 		amq:       amq,
+		bridgeBin: bridgeBin,
 		self:      self,
 		store:     store,
+		stateDir:  stateDir,
 		logs:      filepath.Join(stateDir, "logs"),
 		root:      filepath.Join(stateDir, "amq-root"),
 		configDir: configDir,
 	}, nil
+}
+
+// findBin resolves a companion binary: env override, PATH, then the usual
+// user-local install dirs (an SSH session's PATH lacks them).
+func findBin(envKey, name, home string) (string, error) {
+	if p := os.Getenv(envKey); p != "" {
+		return p, nil
+	}
+	if p, err := exec.LookPath(name); err == nil {
+		return p, nil
+	}
+	for _, dir := range []string{filepath.Join(home, ".local", "bin"), "/opt/homebrew/bin", "/usr/local/bin"} {
+		p := filepath.Join(dir, name)
+		if st, err := os.Stat(p); err == nil && !st.IsDir() {
+			return p, nil
+		}
+	}
+	return "", fmt.Errorf("%s not found on PATH (set %s)", name, envKey)
 }
 
 func runHook() error {
@@ -144,10 +184,13 @@ func move(e env, oldPane, newPane string) error {
 	}
 	rec.PaneAliases = append(rec.PaneAliases, oldPane)
 	rec.PaneID = newPane
-	if err := e.store.Put(rec); err != nil {
+	// Delete before Put: a crash in between leaves no record, which the
+	// next reconcile repairs by re-adopting the pane, whereas two records
+	// for one waker would be reconciled as two owners.
+	if err := e.store.Delete(oldPane); err != nil {
 		return err
 	}
-	if err := e.store.Delete(oldPane); err != nil {
+	if err := e.store.Put(rec); err != nil {
 		return err
 	}
 	if err := adapter.WriteIdentity(e.configDir, adapter.Identity{PaneID: newPane, Handle: rec.Handle, Root: rec.Root}); err != nil {
@@ -198,6 +241,13 @@ func ensure(e env, paneID string) error {
 	argvPane := paneID
 	if exists {
 		argvPane = rec.ArgvPane()
+		// A renamed occupant leaves its previous handle's waker behind;
+		// retire that one first, by the generation this record owns.
+		if rec.Handle != handle {
+			if err := retireRecorded(ctx, e, rec); err != nil {
+				return err
+			}
+		}
 	}
 	if err := adapter.EnsureMailbox(ctx, e.amq, e.root, handle); err != nil {
 		return err
@@ -253,14 +303,28 @@ func ensure(e env, paneID string) error {
 	return nil
 }
 
-// retireWaker stops whatever waker amq currently holds for the handle,
-// by its exact saved identity and generation.
-func retireWaker(ctx context.Context, e env, handle string) error {
-	st, err := adapter.WakeCheck(ctx, e.amq, e.root, handle)
+// retireRecorded stops the waker this record owns and nothing else: the
+// live lock must still carry the record's generation and the target the
+// record implies. A parked record owns no waker. A lock that belongs to
+// someone else (the handle was reused after a delayed release) is left
+// alone.
+func retireRecorded(ctx context.Context, e env, rec adapter.WakerRecord) error {
+	if rec.Generation == "" {
+		return nil
+	}
+	st, err := adapter.WakeCheck(ctx, e.amq, e.root, rec.Handle)
 	if err != nil {
 		return err
 	}
-	return adapter.WakeRetire(ctx, e.amq, e.root, handle, st)
+	if st.Status == "missing" {
+		return nil
+	}
+	want := adapter.ExpectedTarget(e.self, rec.Handle, rec.ArgvPane(), e.root)
+	if st.Generation != rec.Generation || !st.HasTarget || !st.Target.Equal(want) {
+		fmt.Printf("waker for %s is generation %s, not this record's %s; leaving it\n", rec.Handle, st.Generation, rec.Generation)
+		return nil
+	}
+	return adapter.WakeRetire(ctx, e.amq, e.root, rec.Handle, st)
 }
 
 // park handles an agent released from a pane that stays open: the waker is
@@ -285,7 +349,7 @@ func park(e env, paneID string) error {
 		fmt.Printf("pane %s has no waker record\n", paneID)
 		return nil
 	}
-	if err := retireWaker(ctx, e, rec.Handle); err != nil {
+	if err := retireRecorded(ctx, e, rec); err != nil {
 		return err
 	}
 	fmt.Printf("parked pane=%s handle=%s waker pid=%d\n", paneID, rec.Handle, rec.PID)
@@ -305,7 +369,7 @@ func stop(e env, paneID string) error {
 		fmt.Printf("pane %s has no waker record\n", paneID)
 		return adapter.RemoveIdentity(e.configDir, paneID)
 	}
-	if err := retireWaker(ctx, e, rec.Handle); err != nil {
+	if err := retireRecorded(ctx, e, rec); err != nil {
 		return err
 	}
 	if err := e.store.Delete(paneID); err != nil {
@@ -359,6 +423,9 @@ func runReconcile() error {
 		}
 	}
 	fmt.Printf("reconcile: live=%d stopped=%d started=%d\n", len(live), len(plan.Stop), len(plan.Start))
+	if err := bridgeEnsure(); err != nil {
+		fmt.Printf("bridge: %v\n", err)
+	}
 	return nil
 }
 
@@ -409,4 +476,37 @@ func runInject(args []string) int {
 		fmt.Fprintf(os.Stderr, "herdr-amq-adapter: inject pane=%s %s %s\n", paneID, out.Code, out.Note)
 	}
 	return out.ExitCode()
+}
+
+// runRendezvous serves the amq-bridge courier contract on a loopback
+// address. Peers reach it through an SSH tunnel; it never listens on a
+// routable interface.
+func runRendezvous(args []string) error {
+	fs := flag.NewFlagSet("rendezvous", flag.ContinueOnError)
+	listen := fs.String("listen", "127.0.0.1:0", "loopback address to listen on")
+	dir := fs.String("dir", "", "directory for pending envelopes")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *dir == "" {
+		return errors.New("--dir is required")
+	}
+	host, _, err := net.SplitHostPort(*listen)
+	if err != nil {
+		return fmt.Errorf("--listen: %w", err)
+	}
+	if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+		return fmt.Errorf("--listen must be a loopback address, got %q", host)
+	}
+	store, err := rendezvous.Open(*dir)
+	if err != nil {
+		return err
+	}
+	ln, err := net.Listen("tcp", *listen)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("rendezvous listening on http://%s dir=%s\n", ln.Addr(), *dir)
+	srv := &http.Server{Handler: store.Handler(), ReadHeaderTimeout: 10 * time.Second}
+	return srv.Serve(ln)
 }

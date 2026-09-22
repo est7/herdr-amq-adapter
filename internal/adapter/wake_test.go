@@ -1,6 +1,9 @@
 package adapter
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 const checkValid = `{"schema":2,"agent":"claude-2","wake":{"status":"valid","live":true,"pid":88168,"mode":"inject-via","owner_bound":false,"generation":"565a19d9fb55b5fef7564769ebc161d7","target_digest":"sha256:b0b8"}}`
 const checkStale = `{"schema":2,"agent":"bob","wake":{"status":"stale","live":false,"pid":21119,"generation":"595690c624217b8bdb2e631c44db7411","target_digest":"sha256:x"}}`
@@ -67,5 +70,21 @@ func TestRetireArgsFromTarget(t *testing.T) {
 	}
 	if !ExpectedTarget("/a/adapter", "bob", "w1:p1", "/root").Equal(tgt) {
 		t.Error("ExpectedTarget must equal the target amq saves for AmqWakeArgs")
+	}
+}
+
+// A lock that cannot be fenced is never retired: no generation or no saved
+// target must be an error, not an unfenced destructive call.
+func TestWakeRetireFailsClosedWithoutFence(t *testing.T) {
+	ctx := context.Background()
+	if err := WakeRetire(ctx, "/nonexistent/amq", "/r", "bob", WakeState{Status: "missing"}); err != nil {
+		t.Errorf("missing lock must be a no-op: %v", err)
+	}
+	tgt := WakeTarget{InjectVia: "/a", InjectArgs: []string{"inject"}, RetryUntil: "injected"}
+	if err := WakeRetire(ctx, "/nonexistent/amq", "/r", "bob", WakeState{Status: "valid", HasTarget: true, Target: tgt}); err == nil {
+		t.Error("valid lock without generation must be refused before calling amq")
+	}
+	if err := WakeRetire(ctx, "/nonexistent/amq", "/r", "bob", WakeState{Status: "stale", Generation: "abc"}); err == nil {
+		t.Error("lock without saved target must be refused before calling amq")
 	}
 }

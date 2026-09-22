@@ -61,6 +61,32 @@ fix loop, single audit, test-hardening attack, or a debate between peers),
 read `references/patterns.md`: it holds the role prompts, verdict markers,
 and round bounds for each.
 
+## Agents on other machines
+
+Herdr can show saved SSH machines next to Local. Their agents reach you
+through the same AMQ mailbox under the name `<machine>-<agent>`
+(`heping-codex`), and they see you as `<your machine>-<you>`. Messaging
+them is ordinary `amq send --to heping-codex`; nothing else changes.
+
+- The user names a machine ("在 heping 上开个 codex"): resolve it with
+  `herdr machine list --json` (match `label` exactly; list the labels and
+  ask when nothing matches). Start and inspect agents there with the same
+  prefix on every command, `herdr --machine heping pane split …` and
+  `herdr --machine heping agent start codex --kind codex --pane <id>`, reading
+  ids from that machine's responses; local ids and `--current` do not exist
+  there.
+- A remote agent needs an explicit working directory. Local defaults to
+  the caller's cwd; remote has no such anchor. Use the directory the user
+  gave (absolute or `~/`), else the only live workspace on that machine
+  (`herdr --machine <label> workspace list`), else ask. Set it with
+  `pane split --cwd`; `agent start` inherits the pane's cwd.
+- Reply to a `<machine>-<agent>` sender with
+  `amq send --to <sender> --thread <thread> --body …`, quoting the thread
+  from the message; `amq reply --id` cannot find bridged messages.
+- If `herdr --machine` reports the remote does not support machine API
+  forwarding, that machine's Herdr is too old; if the agent starts but never
+  shows in `amq who`, the plugin is not linked or not paired there.
+
 ## Rules
 
 - Never `amq init`, never set `AM_ROOT` or `AM_ME` by hand, never start
