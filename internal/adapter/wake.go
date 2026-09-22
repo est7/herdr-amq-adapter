@@ -317,3 +317,38 @@ func parseStatusReason(out []byte) (status, reason string) {
 	_ = json.Unmarshal(out, &doc)
 	return doc.Status, doc.Reason
 }
+
+// Ownership is what a record can prove about the lock currently held for
+// its handle.
+type Ownership int
+
+const (
+	// OwnsNothing: no lock, or the record is parked (owns no generation).
+	OwnsNothing Ownership = iota
+	// OwnsLock: the live lock carries the record's generation and target.
+	OwnsLock
+	// ForeignLock: a positively different generation; someone else's waker
+	// (the handle was reused after a delayed release). Leave it alone.
+	ForeignLock
+)
+
+// DecideOwnership classifies the observed lock against the record. An
+// observation that cannot identify the lock (no generation, no saved
+// target, or a target that disagrees with the generation's record) is an
+// error: cleanup must fail closed rather than abandon a possibly live
+// waker and discard the only credential that could retire it.
+func DecideOwnership(st WakeState, rec WakerRecord, want WakeTarget) (Ownership, error) {
+	if rec.Generation == "" || st.Status == "missing" {
+		return OwnsNothing, nil
+	}
+	if st.Generation == "" || !st.HasTarget {
+		return OwnsNothing, fmt.Errorf("wake lock for %s cannot be identified (generation %q, target present %v); refusing to treat it as retired", rec.Handle, st.Generation, st.HasTarget)
+	}
+	if st.Generation != rec.Generation {
+		return ForeignLock, nil
+	}
+	if !st.Target.Equal(want) {
+		return OwnsNothing, fmt.Errorf("wake lock for %s has this record's generation %s but a different target; refusing to guess", rec.Handle, rec.Generation)
+	}
+	return OwnsLock, nil
+}

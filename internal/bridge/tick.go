@@ -57,7 +57,11 @@ func Tick(ctx context.Context, env Env) Report {
 		}
 	}
 	// push: one cycle per spool that has work
-	for _, src := range spoolsWithWork(env.Root) {
+	spools, err := spoolsWithWork(env.Root)
+	if err != nil {
+		rep.Errors = append(rep.Errors, err)
+	}
+	for _, src := range spools {
 		sender, ok := strings.CutPrefix(src, env.Local.Host+"-")
 		if !ok {
 			continue
@@ -88,7 +92,9 @@ func Tick(ctx context.Context, env Env) Report {
 }
 
 // forwardAlias moves every new message in the alias mailbox for peer/agent
-// into the sender's bridge spool.
+// into the sender's bridge spool. Messages are isolated from each other: a
+// malformed one is quarantined, a transient failure (enqueue, I/O) is
+// reported and retried next tick, and the rest of the mailbox proceeds.
 func forwardAlias(ctx context.Context, env Env, peer Peer, agent string, rep *Report) error {
 	alias := AliasHandle(peer.Host, agent)
 	newDir := filepath.Join(env.Root, "agents", alias, "inbox", "new")
@@ -105,40 +111,63 @@ func forwardAlias(ctx context.Context, env Env, peer Peer, agent string, rep *Re
 			continue
 		}
 		path := filepath.Join(newDir, e.Name())
-		raw, err := os.ReadFile(path)
+		sender, id, err := forwardOne(ctx, env, alias, agent, dest, path)
 		if err != nil {
-			return err
-		}
-		id, sender, err := headerIDFrom(raw)
-		if err != nil {
-			return fmt.Errorf("%s: %w", path, err)
-		}
-		src := AliasHandle(env.Local.Host, sender)
-		if !spooled(env.Root, src, id) {
-			cfgPath, err := WriteEnqueueConfig(env.StateDir, EnqueueConfig{
-				Root: env.Root, SourceHost: env.Local.Host, SourceHandle: src, AllowedDestAliases: []string{dest},
-			})
-			if err != nil {
-				return err
-			}
-			msg, err := Readdress(raw, src, agent)
-			if err != nil {
-				return fmt.Errorf("%s: %w", path, err)
-			}
-			if err := Enqueue(ctx, env.BridgeBin, cfgPath, dest, msg); err != nil {
-				return err
-			}
-		}
-		curDir := filepath.Join(env.Root, "agents", alias, "inbox", "cur")
-		if err := os.MkdirAll(curDir, 0o700); err != nil {
-			return err
-		}
-		if err := os.Rename(path, filepath.Join(curDir, e.Name())); err != nil {
-			return err
+			rep.Errors = append(rep.Errors, err)
+			continue
 		}
 		rep.Forwarded = append(rep.Forwarded, fmt.Sprintf("%s -> %s %s", sender, dest, id))
 	}
 	return nil
+}
+
+// forwardOne spools a single alias-mailbox message. A file that is not an
+// AMQ message can never be forwarded and is moved to inbox/quarantine so
+// it stops being retried; every other failure leaves the file in new.
+func forwardOne(ctx context.Context, env Env, alias, agent, dest, path string) (sender, id string, err error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", "", err
+	}
+	id, sender, err = headerIDFrom(raw)
+	if err != nil {
+		return "", "", quarantine(env.Root, alias, path, err)
+	}
+	src := AliasHandle(env.Local.Host, sender)
+	if !spooled(env.Root, src, id) {
+		cfgPath, err := WriteEnqueueConfig(env.StateDir, EnqueueConfig{
+			Root: env.Root, SourceHost: env.Local.Host, SourceHandle: src, AllowedDestAliases: []string{dest},
+		})
+		if err != nil {
+			return "", "", err
+		}
+		msg, err := Readdress(raw, src, agent)
+		if err != nil {
+			return "", "", quarantine(env.Root, alias, path, err)
+		}
+		if err := Enqueue(ctx, env.BridgeBin, cfgPath, dest, msg); err != nil {
+			return "", "", fmt.Errorf("%s: %w", filepath.Base(path), err)
+		}
+	}
+	curDir := filepath.Join(env.Root, "agents", alias, "inbox", "cur")
+	if err := os.MkdirAll(curDir, 0o700); err != nil {
+		return "", "", err
+	}
+	if err := os.Rename(path, filepath.Join(curDir, filepath.Base(path))); err != nil {
+		return "", "", err
+	}
+	return sender, id, nil
+}
+
+func quarantine(root, alias, path string, cause error) error {
+	qdir := filepath.Join(root, "agents", alias, "inbox", "quarantine")
+	if err := os.MkdirAll(qdir, 0o700); err != nil {
+		return err
+	}
+	if err := os.Rename(path, filepath.Join(qdir, filepath.Base(path))); err != nil {
+		return err
+	}
+	return fmt.Errorf("%s quarantined: %w", filepath.Base(path), cause)
 }
 
 func headerIDFrom(raw []byte) (id, from string, err error) {
@@ -170,19 +199,30 @@ func spooled(root, src, id string) bool {
 	return false
 }
 
-func spoolsWithWork(root string) []string {
+// spoolsWithWork lists spools holding pending transfers. I/O failures are
+// returned, never mistaken for an empty spool: a queue that cannot be
+// read must show up in the report, not stall silently.
+func spoolsWithWork(root string) ([]string, error) {
 	base := filepath.Join(root, "bridge", "outbox")
 	entries, err := os.ReadDir(base)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("read spools: %w", err)
 	}
 	var out []string
+	var errs []error
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
 		}
 		files, err := os.ReadDir(filepath.Join(base, e.Name(), "new"))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
 		if err != nil {
+			errs = append(errs, fmt.Errorf("read spool %s: %w", e.Name(), err))
 			continue
 		}
 		for _, f := range files {
@@ -193,5 +233,5 @@ func spoolsWithWork(root string) []string {
 		}
 	}
 	sort.Strings(out)
-	return out
+	return out, errors.Join(errs...)
 }

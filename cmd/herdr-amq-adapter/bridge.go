@@ -69,17 +69,16 @@ func runPeer(args []string) error {
 	return fmt.Errorf("unknown peer command %q", args[0])
 }
 
-// localAgents is this plugin's own inventory: the handles it runs wakers
-// for. It needs no Herdr access, so it also works over a bare SSH session.
+// localAgents is this plugin's own inventory: the handles whose wakers it
+// currently owns. Parked records (agent released) are excluded so a peer
+// never routes mail to a mailbox nobody reads. It needs no Herdr access, so
+// it also works over a bare SSH session.
 func localAgents(e env) ([]string, error) {
 	recs, err := e.store.List()
 	if err != nil {
 		return nil, err
 	}
-	var out []string
-	for _, r := range recs {
-		out = append(out, r.Handle)
-	}
+	out := adapter.LiveHandles(recs)
 	sort.Strings(out)
 	return out, nil
 }
@@ -164,11 +163,31 @@ func bridgeRun() error {
 		defer srv.Close()
 		fmt.Printf("rendezvous serving on %s\n", ln.Addr())
 	}
-	for _, p := range benv.Peers {
-		if p.SSHTarget != "" && p.RendezvousPort > 0 {
-			go keepTunnel(ctx, p)
+	tunnels := map[string]context.CancelFunc{}
+	reconcileTunnels := func(peers []bridge.Peer) {
+		want := map[string]bridge.Peer{}
+		for _, p := range peers {
+			if p.SSHTarget != "" && p.RendezvousPort > 0 {
+				want[p.Host+"|"+p.SSHTarget+"|"+fmt.Sprint(p.RendezvousPort)] = p
+			}
+		}
+		for key, cancel := range tunnels {
+			if _, still := want[key]; !still {
+				cancel()
+				delete(tunnels, key)
+				fmt.Printf("tunnel %s stopped\n", key)
+			}
+		}
+		for key, p := range want {
+			if _, running := tunnels[key]; running {
+				continue
+			}
+			tctx, tcancel := context.WithCancel(ctx)
+			tunnels[key] = tcancel
+			go keepTunnel(tctx, p)
 		}
 	}
+	reconcileTunnels(benv.Peers)
 	lastInventory := time.Time{}
 	for {
 		if time.Since(lastInventory) >= inventoryEvery {
@@ -181,9 +200,15 @@ func bridgeRun() error {
 				}
 			}
 			lastInventory = time.Now()
-			if benv, ok, err = bridgeEnv(e); err != nil || !ok {
+			fresh, ok, err := bridgeEnv(e)
+			if err != nil || !ok {
 				return fmt.Errorf("reload bridge config: %v", err)
 			}
+			if fresh.Local.RendezvousPort != benv.Local.RendezvousPort {
+				return fmt.Errorf("rendezvous port changed (%d -> %d); restart bridge run", benv.Local.RendezvousPort, fresh.Local.RendezvousPort)
+			}
+			benv = fresh
+			reconcileTunnels(benv.Peers)
 			if err := ensureAliasMailboxes(ctx, e, benv.Peers); err != nil {
 				fmt.Printf("alias mailboxes: %v\n", err)
 			}
@@ -242,6 +267,12 @@ func keepTunnel(ctx context.Context, p bridge.Peer) {
 	}
 }
 
+// sshAdapter runs the peer's adapter over SSH. OpenSSH joins the remote
+// command into one shell string, so every operand must satisfy a grammar
+// with no whitespace or metacharacters: the adapter path is validated by
+// ValidRemotePath, subcommand words are plugin constants, and values are
+// validated at their source (host aliases by ValidHost, handles by amq's
+// own grammar before they ever reach a record). Data travels on stdin.
 func sshAdapter(ctx context.Context, p bridge.Peer, stdin []byte, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, sshTimeout)
 	defer cancel()
@@ -249,7 +280,15 @@ func sshAdapter(ctx context.Context, p bridge.Peer, stdin []byte, args ...string
 	if remote == "" {
 		remote = "~/.local/bin/herdr-amq-adapter"
 	}
-	cmd := exec.CommandContext(ctx, "ssh", append([]string{"-o", "BatchMode=yes", "-o", "ConnectTimeout=10", p.SSHTarget, remote}, args...)...)
+	if err := bridge.ValidRemotePath(remote); err != nil {
+		return nil, err
+	}
+	for _, a := range args {
+		if strings.ContainsAny(a, " \t\n'\"`$;&|<>()*?[]{}\\") {
+			return nil, fmt.Errorf("refusing remote argument %q", a)
+		}
+	}
+	cmd := exec.CommandContext(ctx, "ssh", append([]string{"-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "--", p.SSHTarget, remote}, args...)...)
 	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)
 	}
@@ -280,8 +319,8 @@ func syncInventory(ctx context.Context, e env, local bridge.Local, p bridge.Peer
 	if _, err := sshAdapter(ctx, p, nil, "peer", "aliases", "--host", local.Host, "--agents", strings.Join(ours, ",")); err != nil {
 		return err
 	}
-	p.Agents = theirs
-	return bridge.SavePeer(e.configDir, p)
+	_, err = bridge.UpdatePeer(e.configDir, p.Host, func(cur *bridge.Peer) { cur.Agents = theirs })
+	return err
 }
 
 // ensureAliasMailboxes provisions <host>-<agent> for every known remote
@@ -397,6 +436,10 @@ func peerAdd(args []string) error {
 	if err := bridge.ValidHost(*me); err != nil {
 		return err
 	}
+	if err := bridge.ValidRemotePath(*remote); err != nil {
+		return err
+	}
+
 	if err := bridge.ValidHost(*host); err != nil {
 		return err
 	}
@@ -409,6 +452,11 @@ func peerAdd(args []string) error {
 	}
 	if e.bridgeBin == "" {
 		return errors.New("amq-bridge not found on PATH (set AMQ_BRIDGE_BIN)")
+	}
+	if existing, ok, err := bridge.LoadLocal(e.configDir); err != nil {
+		return err
+	} else if ok && existing.Host != *me {
+		return fmt.Errorf("this machine is already bridge host %q; pass --me %s", existing.Host, existing.Host)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
@@ -446,15 +494,21 @@ func peerAdd(args []string) error {
 	if err := bridge.Trust(e.root, *host, accepted.Public); err != nil {
 		return err
 	}
-	local := bridge.Local{Host: *me}
-	if *rendezvous == "here" {
-		local.RendezvousPort = *port
-	}
-	if err := bridge.SaveLocal(e.configDir, local); err != nil {
+	local, err := bridge.UpdateLocal(e.configDir, func(l *bridge.Local) {
+		l.Host = *me
+		if *rendezvous == "here" {
+			l.RendezvousPort = *port
+		}
+	})
+	if err != nil {
 		return err
 	}
-	peer.Agents = accepted.Agents
-	if err := bridge.SavePeer(e.configDir, peer); err != nil {
+	peer, err = bridge.UpdatePeer(e.configDir, *host, func(p *bridge.Peer) {
+		p.Label, p.SSHTarget, p.RemoteAdapter = peer.Label, peer.SSHTarget, peer.RemoteAdapter
+		p.RendezvousPort = peer.RendezvousPort
+		p.Agents = accepted.Agents
+	})
+	if err != nil {
 		return err
 	}
 	if err := syncInventory(ctx, e, local, peer); err != nil {
@@ -477,15 +531,18 @@ func peerAdd(args []string) error {
 // installRemoteAdapter copies this binary to the peer when the remote path
 // has none. Same OS/arch is assumed for v1; a mismatch fails at first use.
 func installRemoteAdapter(ctx context.Context, e env, p bridge.Peer) error {
-	probe := exec.CommandContext(ctx, "ssh", "-o", "BatchMode=yes", p.SSHTarget, "test -x "+p.RemoteAdapter)
+	if err := bridge.ValidRemotePath(p.RemoteAdapter); err != nil {
+		return err
+	}
+	probe := exec.CommandContext(ctx, "ssh", "-o", "BatchMode=yes", "--", p.SSHTarget, "test", "-x", p.RemoteAdapter)
 	if probe.Run() == nil {
 		return nil
 	}
 	dir := filepath.Dir(p.RemoteAdapter)
-	if out, err := exec.CommandContext(ctx, "ssh", "-o", "BatchMode=yes", p.SSHTarget, "mkdir -p "+dir).CombinedOutput(); err != nil {
+	if out, err := exec.CommandContext(ctx, "ssh", "-o", "BatchMode=yes", "--", p.SSHTarget, "mkdir", "-p", dir).CombinedOutput(); err != nil {
 		return fmt.Errorf("ssh mkdir: %w: %s", err, out)
 	}
-	if out, err := exec.CommandContext(ctx, "scp", "-q", e.self, p.SSHTarget+":"+p.RemoteAdapter).CombinedOutput(); err != nil {
+	if out, err := exec.CommandContext(ctx, "scp", "-q", "--", e.self, p.SSHTarget+":"+p.RemoteAdapter).CombinedOutput(); err != nil {
 		return fmt.Errorf("scp adapter: %w: %s", err, out)
 	}
 	fmt.Printf("installed adapter at %s:%s\n", p.SSHTarget, p.RemoteAdapter)
@@ -527,22 +584,26 @@ func peerAccept(args []string) error {
 	if err := bridge.Trust(e.root, *peerHost, string(record)); err != nil {
 		return err
 	}
-	local := bridge.Local{Host: *host}
-	if *here {
-		local.RendezvousPort = *port
+	if existing, ok, err := bridge.LoadLocal(e.configDir); err != nil {
+		return err
+	} else if ok && existing.Host != *host {
+		return fmt.Errorf("this machine is already bridge host %q, not %q", existing.Host, *host)
 	}
-	if err := bridge.SaveLocal(e.configDir, local); err != nil {
+	if _, err := bridge.UpdateLocal(e.configDir, func(l *bridge.Local) {
+		l.Host = *host
+		if *here {
+			l.RendezvousPort = *port
+		}
+	}); err != nil {
 		return err
 	}
-	p, _, err := bridge.LoadPeer(e.configDir, *peerHost)
-	if err != nil {
-		return err
-	}
-	p.Host = *peerHost
-	if !*here {
-		p.RendezvousPort = *port
-	}
-	if err := bridge.SavePeer(e.configDir, p); err != nil {
+	if _, err := bridge.UpdatePeer(e.configDir, *peerHost, func(p *bridge.Peer) {
+		if !*here {
+			p.RendezvousPort = *port
+		} else {
+			p.RendezvousPort = 0
+		}
+	}); err != nil {
 		return err
 	}
 	pub, err := bridge.PublicKey(ctx, e.bridgeBin, e.root)
@@ -587,20 +648,19 @@ func peerAliases(args []string) error {
 	if err != nil {
 		return err
 	}
-	p, ok, err := bridge.LoadPeer(e.configDir, *host)
-	if err != nil {
+	if _, ok, err := bridge.LoadPeer(e.configDir, *host); err != nil {
 		return err
-	}
-	if !ok {
+	} else if !ok {
 		return fmt.Errorf("unknown peer %q; pair first", *host)
 	}
-	p.Agents = nil
+	var list []string
 	for _, a := range strings.Split(*agents, ",") {
 		if a = strings.TrimSpace(a); a != "" {
-			p.Agents = append(p.Agents, a)
+			list = append(list, a)
 		}
 	}
-	if err := bridge.SavePeer(e.configDir, p); err != nil {
+	p, err := bridge.UpdatePeer(e.configDir, *host, func(cur *bridge.Peer) { cur.Agents = list })
+	if err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)

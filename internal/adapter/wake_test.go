@@ -88,3 +88,39 @@ func TestWakeRetireFailsClosedWithoutFence(t *testing.T) {
 		t.Error("lock without saved target must be refused before calling amq")
 	}
 }
+
+// Cleanup retires only what the record can prove it owns; anything it
+// cannot identify is an error so the record survives as the credential.
+func TestDecideOwnership(t *testing.T) {
+	want := ExpectedTarget("/a", "bob", "w1:p1", "/r")
+	rec := WakerRecord{Handle: "bob", PaneID: "w1:p1", Generation: "g1"}
+	cases := []struct {
+		name string
+		st   WakeState
+		rec  WakerRecord
+		want Ownership
+		err  bool
+	}{
+		{"parked record owns nothing", WakeState{Status: "valid", Generation: "g1", HasTarget: true, Target: want}, WakerRecord{Handle: "bob"}, OwnsNothing, false},
+		{"missing lock", WakeState{Status: "missing"}, rec, OwnsNothing, false},
+		{"owned", WakeState{Status: "valid", Generation: "g1", HasTarget: true, Target: want}, rec, OwnsLock, false},
+		{"stale but owned", WakeState{Status: "stale", Generation: "g1", HasTarget: true, Target: want}, rec, OwnsLock, false},
+		{"foreign generation", WakeState{Status: "valid", Generation: "g2", HasTarget: true, Target: want}, rec, ForeignLock, false},
+		{"no generation", WakeState{Status: "valid", HasTarget: true, Target: want}, rec, OwnsNothing, true},
+		{"no target", WakeState{Status: "valid", Generation: "g1"}, rec, OwnsNothing, true},
+		{"same generation other target", WakeState{Status: "valid", Generation: "g1", HasTarget: true, Target: ExpectedTarget("/b", "bob", "w1:p1", "/r")}, rec, OwnsNothing, true},
+	}
+	for _, c := range cases {
+		got, err := DecideOwnership(c.st, c.rec, want)
+		if (err != nil) != c.err || got != c.want {
+			t.Errorf("%s: got %v err=%v, want %v err=%v", c.name, got, err, c.want, c.err)
+		}
+	}
+}
+
+func TestLiveHandlesExcludesParked(t *testing.T) {
+	got := LiveHandles([]WakerRecord{{Handle: "a", Generation: "g"}, {Handle: "parked"}, {Handle: "b", Generation: "h"}})
+	if len(got) != 2 || got[0] != "a" || got[1] != "b" {
+		t.Errorf("got %v", got)
+	}
+}

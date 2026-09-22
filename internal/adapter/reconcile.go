@@ -85,3 +85,16 @@ func Plan(live []AgentInfo, wakers []WakerRecord, current func(WakerRecord) bool
 	}
 	return plan
 }
+
+// LiveHandles are the handles whose records currently own a waker; parked
+// records (agent released) are excluded, so peers are never told about an
+// agent that cannot read its mail.
+func LiveHandles(recs []WakerRecord) []string {
+	var out []string
+	for _, r := range recs {
+		if r.Generation != "" {
+			out = append(out, r.Handle)
+		}
+	}
+	return out
+}

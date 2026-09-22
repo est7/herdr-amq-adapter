@@ -303,11 +303,10 @@ func ensure(e env, paneID string) error {
 	return nil
 }
 
-// retireRecorded stops the waker this record owns and nothing else: the
-// live lock must still carry the record's generation and the target the
-// record implies. A parked record owns no waker. A lock that belongs to
-// someone else (the handle was reused after a delayed release) is left
-// alone.
+// retireRecorded stops the waker this record owns and nothing else. A
+// positively foreign generation (the handle was reused after a delayed
+// release) is left alone; a lock that cannot be identified is an error so
+// the record is kept as the credential to retire it later.
 func retireRecorded(ctx context.Context, e env, rec adapter.WakerRecord) error {
 	if rec.Generation == "" {
 		return nil
@@ -316,15 +315,19 @@ func retireRecorded(ctx context.Context, e env, rec adapter.WakerRecord) error {
 	if err != nil {
 		return err
 	}
-	if st.Status == "missing" {
-		return nil
-	}
 	want := adapter.ExpectedTarget(e.self, rec.Handle, rec.ArgvPane(), e.root)
-	if st.Generation != rec.Generation || !st.HasTarget || !st.Target.Equal(want) {
+	own, err := adapter.DecideOwnership(st, rec, want)
+	if err != nil {
+		return err
+	}
+	switch own {
+	case adapter.ForeignLock:
 		fmt.Printf("waker for %s is generation %s, not this record's %s; leaving it\n", rec.Handle, st.Generation, rec.Generation)
 		return nil
+	case adapter.OwnsLock:
+		return adapter.WakeRetire(ctx, e.amq, e.root, rec.Handle, st)
 	}
-	return adapter.WakeRetire(ctx, e.amq, e.root, rec.Handle, st)
+	return nil
 }
 
 // park handles an agent released from a pane that stays open: the waker is

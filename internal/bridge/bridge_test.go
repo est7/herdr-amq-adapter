@@ -1,7 +1,10 @@
 package bridge
 
 import (
+	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -87,5 +90,95 @@ func TestConfigRoundTrip(t *testing.T) {
 	}
 	if err := SavePeer(dir, Peer{Host: "Bad Host"}); err == nil {
 		t.Error("invalid host must be rejected")
+	}
+}
+
+func TestValidRemotePath(t *testing.T) {
+	for _, ok := range []string{"~/.local/bin/herdr-amq-adapter", "/Users/ada/herdr-amq-adapter/bin/x", "~/x_y.z-1"} {
+		if err := ValidRemotePath(ok); err != nil {
+			t.Errorf("%q rejected: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"bin/x", "~/a b", "/tmp/x;rm -rf ~", "~/$(id)", "/a/../b", "~/x`y`", "~/x\ny", ""} {
+		if err := ValidRemotePath(bad); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+}
+
+// A fake amq-bridge whose enqueue writes the spool file amq-bridge would;
+// one malformed message must not starve the rest of the alias mailbox.
+func TestTickIsolatesMessagesAndQuarantinesGarbage(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "root")
+	fake := filepath.Join(dir, "fake-amq-bridge")
+	script := `#!/bin/sh
+# enqueue --config CFG --dest-alias DEST ; stdin = message
+if [ "$1" = "enqueue" ]; then
+  cfg=$3; msg=$(cat)
+  root=$(sed -E 's/.*"root":"([^"]*)".*/\1/' "$cfg"); src=$(sed -E 's/.*"source_handle":"([^"]*)".*/\1/' "$cfg")
+  id=$(printf '%s' "$msg" | sed -nE 's/^  "id": "([^"]*)",?$/\1/p' | head -1)
+  mkdir -p "$root/bridge/outbox/$src/new"; printf '%s' "$msg" > "$root/bridge/outbox/$src/new/$id.md"; exit 0
+fi
+# courier cycles: print nothing, succeed
+exit 0
+`
+	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	newDir := filepath.Join(root, "agents", "heping-codex", "inbox", "new")
+	if err := os.MkdirAll(newDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	good := strings.Replace(sample, "2026-09-22T06-08-16.891Z_pid28972_b53cc11f", "id-good", 1)
+	os.WriteFile(filepath.Join(newDir, "0-garbage.md"), []byte("not a message"), 0o600)
+	os.WriteFile(filepath.Join(newDir, "1-good.md"), []byte(good), 0o600)
+	env := Env{BridgeBin: fake, Root: root, StateDir: filepath.Join(dir, "state"), Local: Local{Host: "mac"},
+		Peers: []Peer{{Host: "heping", Agents: []string{"codex"}}}, LocalAgents: []string{"claude"}, RendezvousURL: "http://127.0.0.1:1"}
+	rep := Tick(context.Background(), env)
+	if len(rep.Forwarded) != 1 || !strings.HasPrefix(rep.Forwarded[0], "claude -> heping/codex id-good") {
+		t.Fatalf("forwarded %v errors %v", rep.Forwarded, rep.Errors)
+	}
+	if len(rep.Errors) != 1 || !strings.Contains(rep.Errors[0].Error(), "quarantined") {
+		t.Fatalf("errors %v", rep.Errors)
+	}
+	if _, err := os.Stat(filepath.Join(root, "agents", "heping-codex", "inbox", "quarantine", "0-garbage.md")); err != nil {
+		t.Error("garbage not quarantined")
+	}
+	if _, err := os.Stat(filepath.Join(root, "agents", "heping-codex", "inbox", "cur", "1-good.md")); err != nil {
+		t.Error("good message not moved to cur")
+	}
+	spool := filepath.Join(root, "bridge", "outbox", "mac-claude", "new", "id-good.md")
+	b, err := os.ReadFile(spool)
+	if err != nil {
+		t.Fatalf("spool file missing: %v", err)
+	}
+	if !strings.Contains(string(b), `"from": "mac-claude"`) || !strings.Contains(string(b), `"codex"`) {
+		t.Errorf("spooled message not readdressed:\n%s", b)
+	}
+	// second tick: nothing new, spool already holds the id -> no duplicate
+	rep = Tick(context.Background(), env)
+	if len(rep.Forwarded) != 0 || len(rep.Errors) != 0 {
+		t.Errorf("second tick: %v %v", rep.Forwarded, rep.Errors)
+	}
+}
+
+func TestSpoolsWithWorkSurfacesIOErrors(t *testing.T) {
+	root := t.TempDir()
+	spool := filepath.Join(root, "bridge", "outbox", "mac-claude", "new")
+	if err := os.MkdirAll(spool, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(spool, "m.md"), []byte("x"), 0o600)
+	got, err := spoolsWithWork(root)
+	if err != nil || len(got) != 1 || got[0] != "mac-claude" {
+		t.Fatalf("got %v %v", got, err)
+	}
+	if err := os.Chmod(spool, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(spool, 0o700) })
+	if _, err := spoolsWithWork(root); err == nil {
+		t.Error("unreadable spool must be an error, not empty")
 	}
 }

@@ -9,9 +9,23 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"syscall"
 )
 
 var hostRe = regexp.MustCompile(`^[a-z0-9_][a-z0-9_-]{0,31}$`)
+
+// remotePathRe is the grammar for a path used inside an SSH remote command
+// string; OpenSSH hands that string to the peer's shell, so no whitespace
+// or metacharacters are ever accepted.
+var remotePathRe = regexp.MustCompile(`^~?/[A-Za-z0-9_./-]+$|^~/[A-Za-z0-9_./-]+$`)
+
+// ValidRemotePath accepts absolute or ~/ paths made of [A-Za-z0-9_./-].
+func ValidRemotePath(p string) error {
+	if !remotePathRe.MatchString(p) || strings.Contains(p, "..") {
+		return fmt.Errorf("remote path %q must be absolute or ~/ and contain only [A-Za-z0-9_./-]", p)
+	}
+	return nil
+}
 
 // ValidHost is amq-bridge's host alias grammar (also a valid Herdr name
 // prefix, so <host>-<agent> stays a legal handle).
@@ -65,6 +79,59 @@ func SaveLocal(configDir string, l Local) error {
 		return err
 	}
 	return writeJSON(localPath(configDir), l)
+}
+
+// UpdateLocal applies fn to the current local config under the config
+// lock, so concurrent writers (peer add, peer accept over SSH, the runner)
+// never clobber each other's fields.
+func UpdateLocal(configDir string, fn func(*Local)) (Local, error) {
+	unlock, err := lockConfig(configDir)
+	if err != nil {
+		return Local{}, err
+	}
+	defer unlock()
+	l, _, err := LoadLocal(configDir)
+	if err != nil {
+		return Local{}, err
+	}
+	fn(&l)
+	return l, SaveLocal(configDir, l)
+}
+
+// UpdatePeer applies fn to the peer's current record under the config lock.
+func UpdatePeer(configDir, host string, fn func(*Peer)) (Peer, error) {
+	unlock, err := lockConfig(configDir)
+	if err != nil {
+		return Peer{}, err
+	}
+	defer unlock()
+	p, _, err := LoadPeer(configDir, host)
+	if err != nil {
+		return Peer{}, err
+	}
+	p.Host = host
+	fn(&p)
+	if p.RemoteAdapter != "" {
+		if err := ValidRemotePath(p.RemoteAdapter); err != nil {
+			return Peer{}, err
+		}
+	}
+	return p, SavePeer(configDir, p)
+}
+
+func lockConfig(configDir string) (func(), error) {
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(filepath.Join(configDir, ".bridge.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN); f.Close() }, nil
 }
 
 func LoadPeer(configDir, host string) (Peer, bool, error) {
@@ -126,7 +193,7 @@ func writeJSON(path string, v any) error {
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
+	tmp := fmt.Sprintf("%s.%d.tmp", path, os.Getpid())
 	if err := os.WriteFile(tmp, b, 0o600); err != nil {
 		return err
 	}
