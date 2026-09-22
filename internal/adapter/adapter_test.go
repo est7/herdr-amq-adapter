@@ -63,19 +63,6 @@ func TestClassifyPromptResult(t *testing.T) {
 	}
 }
 
-func TestGateOnStatus(t *testing.T) {
-	// working is deliverable: the agent queues the notice into its turn.
-	for _, st := range []string{"idle", "done", "working", "unknown", ""} {
-		if _, ready := GateOnStatus(st); !ready {
-			t.Errorf("status %q must be ready", st)
-		}
-	}
-	out, ready := GateOnStatus("blocked")
-	if ready || out.Progress != ProgressDeferred || out.ExitCode() != 1 {
-		t.Errorf("blocked: got ready=%v %+v; want deferred exit 1", ready, out)
-	}
-}
-
 func TestChooseHandle(t *testing.T) {
 	taken := map[string]bool{"claude": true, "claude-2": true}
 	cases := []struct {

@@ -24,6 +24,8 @@ func AliasHandle(host, agent string) string { return host + "-" + agent }
 // DestAlias is amq-bridge's receiver-owned address for a remote agent.
 func DestAlias(host, agent string) string { return host + "/" + agent }
 
+var handleRe = regexp.MustCompile(`^[a-z0-9_][a-z0-9_-]*$`)
+
 var frontMatter = regexp.MustCompile(`(?s)\A---json\n(.*?)\n---\n(.*)\z`)
 
 // Readdress rewrites an AMQ message file for the wire: from becomes the

@@ -30,6 +30,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/est7/herdr-amq-adapter/internal/durable"
 )
 
 const transfersPath = "/v1/transfers"
@@ -55,7 +57,7 @@ type Store struct {
 }
 
 func Open(dir string) (*Store, error) {
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := durable.MkdirAll(dir); err != nil {
 		return nil, fmt.Errorf("rendezvous dir: %w", err)
 	}
 	return &Store{dir: dir}, nil
@@ -97,11 +99,7 @@ func (s *Store) save(st stored) error {
 	if err != nil {
 		return err
 	}
-	tmp := s.path(st.Head.TransferID) + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, s.path(st.Head.TransferID))
+	return durable.WriteFile(s.path(st.Head.TransferID), b, 0o600)
 }
 
 // Accept stores the envelope; the same transfer with the same digest is an
@@ -123,6 +121,11 @@ func (s *Store) Accept(raw json.RawMessage) (wireReceipt, error) {
 	if ok {
 		if !strings.EqualFold(prev.Head.PayloadSHA256, head.PayloadSHA256) {
 			return wireReceipt{}, errConflict("transfer digest conflict")
+		}
+		// A previous directory sync may have failed after rename. Re-publish
+		// before acknowledging a retry rather than trusting visibility alone.
+		if err := s.save(prev); err != nil {
+			return wireReceipt{}, err
 		}
 	} else if err := s.save(stored{Head: head, Raw: raw, Received: time.Now()}); err != nil {
 		return wireReceipt{}, err

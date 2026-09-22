@@ -36,8 +36,9 @@ type Report struct {
 // Tick runs one bounded round: forward alias-mailbox mail into spools, push
 // every non-empty spool, poll every local agent's receive alias. Each step
 // is idempotent, so a crash anywhere is repaired by the next tick:
-// forwarding skips a message whose id already sits in the spool (new or
-// sent), the courier's transfer ledger dedupes pushes and applies.
+// destination-specific markers recover successful enqueues; the courier's
+// transfer ledger dedupes pushes and applies. Incomplete upstream spool files
+// fail closed rather than using the courier's default destination.
 func Tick(ctx context.Context, env Env) Report {
 	var rep Report
 	peerHosts := make([]string, 0, len(env.Peers))
@@ -66,6 +67,10 @@ func Tick(ctx context.Context, env Env) Report {
 	for _, src := range spools {
 		sender, ok := strings.CutPrefix(src, env.Local.Host+"-")
 		if !ok {
+			continue
+		}
+		if err := prepareSpool(env.Root, src); err != nil {
+			rep.Errors = append(rep.Errors, err)
 			continue
 		}
 		res, err := RunCourier(ctx, env.BridgeBin, CourierSpec{
@@ -116,6 +121,9 @@ func forwardAlias(ctx context.Context, env Env, peer Peer, agent string, rep *Re
 		}
 		path := filepath.Join(newDir, e.Name())
 		sender, id, err := forwardOne(ctx, env, alias, agent, dest, path)
+		if errors.Is(err, errSpoolBusy) {
+			continue
+		}
 		if err != nil {
 			rep.Errors = append(rep.Errors, err)
 			continue
@@ -138,20 +146,15 @@ func forwardOne(ctx context.Context, env Env, alias, agent, dest, path string) (
 		return "", "", quarantine(env.Root, alias, path, err)
 	}
 	src := AliasHandle(env.Local.Host, sender)
-	if !spooled(env.Root, src, id) {
-		cfgPath, err := WriteEnqueueConfig(env.StateDir, EnqueueConfig{
-			Root: env.Root, SourceHost: env.Local.Host, SourceHandle: src, AllowedDestAliases: []string{dest},
-		})
-		if err != nil {
-			return "", "", err
-		}
-		msg, err := Readdress(raw, src, agent)
-		if err != nil {
-			return "", "", quarantine(env.Root, alias, path, err)
-		}
-		if err := Enqueue(ctx, env.BridgeBin, cfgPath, dest, msg); err != nil {
-			return "", "", fmt.Errorf("%s: %w", filepath.Base(path), err)
-		}
+	if filepath.Base(id) != id || id == "." || id == ".." || strings.ContainsAny(id, "\\\x00") || !handleRe.MatchString(sender) {
+		return "", "", quarantine(env.Root, alias, path, errors.New("invalid message id or sender"))
+	}
+	msg, err := Readdress(raw, src, agent)
+	if err != nil {
+		return "", "", quarantine(env.Root, alias, path, err)
+	}
+	if err := enqueueDestination(ctx, env, src, id, dest, msg); err != nil {
+		return "", "", fmt.Errorf("%s: %w", filepath.Base(path), err)
 	}
 	curDir := filepath.Join(env.Root, "agents", alias, "inbox", "cur")
 	if err := os.MkdirAll(curDir, 0o700); err != nil {
@@ -190,17 +193,6 @@ func headerIDFrom(raw []byte) (id, from string, err error) {
 		return "", "", errors.New("message header lacks id or from")
 	}
 	return h.ID, h.From, nil
-}
-
-// spooled reports whether the sender's spool already holds this message,
-// pending or sent; amq-bridge names spool files by message id.
-func spooled(root, src, id string) bool {
-	for _, box := range []string{"new", "sent"} {
-		if _, err := os.Stat(filepath.Join(root, "bridge", "outbox", src, box, id+".md")); err == nil {
-			return true
-		}
-	}
-	return false
 }
 
 // spoolsWithWork lists spools holding pending transfers. I/O failures are

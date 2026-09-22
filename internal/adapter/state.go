@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+
+	"github.com/est7/herdr-amq-adapter/internal/durable"
 )
 
 // Store persists WakerRecords as one JSON file per pane under
@@ -50,11 +52,7 @@ func (s *Store) Put(w WakerRecord) error {
 	if err != nil {
 		return err
 	}
-	tmp := s.path(w.PaneID) + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, s.path(w.PaneID))
+	return durable.WriteFile(s.path(w.PaneID), b, 0o644)
 }
 
 func (s *Store) Delete(paneID string) error {

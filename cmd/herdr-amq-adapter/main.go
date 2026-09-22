@@ -1,8 +1,8 @@
-// herdr-amq-adapter is a Herdr plugin binary with four entry points:
+// herdr-amq-adapter is a Herdr plugin binary with these primary entry points:
 //
 //	hook       — [[events]] handler: adopt/retire the event's pane
 //	reconcile  — [[startup]] / action: diff live agents vs recorded wakers
-//	inject     — amq --inject-via target: gate on status, `herdr agent prompt`
+//	inject     — amq --inject-via target: `herdr agent prompt`
 //	status     — action: print the waker inventory
 //	rendezvous — serve the amq-bridge courier blob store on loopback
 //
@@ -83,6 +83,12 @@ func main() {
 		os.Exit(runInject(os.Args[2:]))
 	case "status":
 		err = runStatus()
+	case "status-popup":
+		err = runPopup(os.Args[2:])
+	case "dashboard":
+		cmd := exec.Command(adapter.HerdrFromEnv().Bin, "plugin", "pane", "open", "--plugin", pluginID, "--entrypoint", "status")
+		cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+		err = cmd.Run()
 	case "rendezvous":
 		err = runRendezvous(os.Args[2:])
 	case "bridge":
@@ -102,7 +108,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: herdr-amq-adapter hook|reconcile|status|version|inject <pane_id> <handle> <root> <payload>|rendezvous --listen <addr> --dir <dir>|bridge run|ensure|status [--json]|peer add|accept|agents|aliases")
+	fmt.Fprintln(os.Stderr, "usage: herdr-amq-adapter hook|reconcile|status|status-popup [--once]|dashboard|version|inject <pane_id> <handle> <root> <payload>|rendezvous --listen <addr> --dir <dir>|bridge run|ensure|status [--json]|peer add|accept|agents|aliases")
 }
 
 type env struct {
@@ -195,6 +201,9 @@ func runHook() error {
 		return err
 	}
 	defer unlock()
+	if err := bindServer(e); err != nil {
+		return err
+	}
 	switch act.Kind {
 	case adapter.ActionEnsure:
 		return ensure(e, act.PaneID)
@@ -328,7 +337,8 @@ func ensure(e env, paneID string) error {
 		}
 	}
 	fresh := adapter.WakerRecord{
-		PaneID: paneID, Handle: handle, SpawnPaneID: argvPane, Generation: st.Generation, PID: st.PID,
+		ServerSocket: os.Getenv("HERDR_SOCKET_PATH"),
+		PaneID:       paneID, Handle: handle, SpawnPaneID: argvPane, Generation: st.Generation, PID: st.PID,
 		Cwd: info.Cwd, Root: e.root, StartedUnix: rec.StartedUnix, PaneAliases: rec.PaneAliases,
 	}
 	if decision != adapter.DecisionKeep || fresh.StartedUnix == 0 {
@@ -436,6 +446,9 @@ func runReconcile() error {
 		return err
 	}
 	defer unlock()
+	if err := bindServer(e); err != nil {
+		return err
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	live, err := e.herdr.AgentList(ctx)
@@ -467,6 +480,28 @@ func runReconcile() error {
 	fmt.Printf("reconcile: live=%d stopped=%d started=%d\n", len(live), len(plan.Stop), len(plan.Start))
 	if err := bridgeEnsure(); err != nil {
 		return fmt.Errorf("wakers reconciled, but bridge: %w", err)
+	}
+	return nil
+}
+
+// This is a single-session adapter. Refuse the entire foreign lifecycle pass
+// so even colliding pane IDs or handles cannot retire or replace another server.
+func bindServer(e env) error {
+	recs, err := e.store.List()
+	if err != nil {
+		return err
+	}
+	socket := os.Getenv("HERDR_SOCKET_PATH")
+	if err := adapter.CheckServer(recs, socket); err != nil {
+		return err
+	}
+	for _, r := range recs {
+		if r.ServerSocket == "" {
+			r.ServerSocket = socket
+			if err := e.store.Put(r); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }

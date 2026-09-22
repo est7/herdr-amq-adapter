@@ -10,7 +10,7 @@ agent A pane ──amq send --to claude──▶ shared AMQ root ──▶ amq w
                                                                │  --inject-via
                                                                ▼
                        herdr-amq-adapter inject <pane> claude <root> <notice>
-                                                               │ status gate + prompt
+                                                               │ agent prompt
                                                                ▼
                      herdr agent prompt claude "AMQ doorbell run amq drain --include-body then
                      act on it (you are claude in Herdr; first: source <identity>)"
@@ -29,7 +29,7 @@ Requirements:
 
 | what | version | why |
 |---|---|---|
-| Herdr | ≥ 0.9.0 (0.9.1 tested; `--machine` forwarding needs 0.9.1 on the remote) | plugin events, `agent prompt` |
+| Herdr | ≥ 0.9.1 | plugin events, `agent prompt`, status popup |
 | Go | 1.27 (`go.mod`) | the `[[build]]` step |
 | `amq` | ≥ 0.80.1 (tested), on the PATH Herdr's server sees or `AMQ_BIN` | wakers, `wake check/retire/repair` |
 | `amq-bridge` | same release as `amq`, from the release tarball (not in Homebrew) into `~/.local/bin`, or `AMQ_BRIDGE_BIN` | cross-machine only |
@@ -58,7 +58,7 @@ ln -s "<plugin_root>/skills/herdr-amq-adapter" ~/.claude/skills/herdr-amq-adapte
 ```
 
 Actions (`herdr plugin action invoke est7.amq-adapter.<id>`): `reconcile`,
-`status`, `bridge-status`, `bridge-ensure`. `herdr-amq-adapter version`
+`status`, `bridge-status`, `bridge-ensure`, `dashboard`. `herdr-amq-adapter version`
 prints the build (VCS revision, `-modified` when dirty).
 
 ## What it does, zero-config
@@ -66,7 +66,7 @@ prints the build (VCS revision, `-modified` when dirty).
 | moment | plugin action |
 |---|---|
 | Herdr detects an agent in a pane | if unnamed, `herdr agent rename` it `<kind>` or `<kind>-N` (claude, codex-2 …); provision its mailbox in the shared root (`amq init --force` with the merged agent list); write the pane's identity file; spawn a detached `amq wake` for it |
-| mail arrives for that handle | `amq wake` calls `inject`; it reads the agent's live status and submits the notice with `herdr agent prompt` unless the agent is `blocked` (a working agent queues it into its turn) |
+| mail arrives for that handle | `amq wake` calls `inject`, which submits directly with `herdr agent prompt`; Herdr rejects `blocked` before input, and the adapter classifies `agent_blocked` as deferred |
 | `herdr pane move` gives the pane a new id | re-key the record, write an identity file for the new id, keep the old one (the moved process still sees its original `HERDR_PANE_ID`); the waker is untouched because delivery targets the agent **name**, which Herdr carries across moves |
 | agent released, pane stays open | retire the waker; keep the record (pid 0) and identity file so the next agent detected in this pane is offered the same handle (Herdr drops the live name on release) |
 | pane closed or exited | retire the waker, remove identity files (current id and aliases) and the record |
@@ -97,6 +97,18 @@ race is never recorded. The plugin never reads pids from `ps` and never
 signals processes. Lifecycle transitions (hooks, reconcile) are serialised
 by a lock in the state dir.
 
+Mailbox registration has a separate root-wide lock at
+`amq-root/meta/.adapter-registry.lock`. Hooks, reconcile, the bridge runner,
+and SSH alias registration all hold it across the complete config merge.
+Waiting for that lock respects the caller's deadline.
+
+The adapter supports one Herdr server per user-wide registry. Records retain
+the owning `HERDR_SOCKET_PATH`; a hook or reconcile from another server is
+refused before any lifecycle mutation, including name/pane collisions.
+Existing records without this field are bound on the first lifecycle pass;
+perform that first reconcile from the original session. This is an ownership
+guard, not full multi-session support.
+
 ## Injector protocol
 
 `amq wake` runs `<self> inject <pane> <handle> <root> <payload>` per
@@ -106,8 +118,8 @@ identity file mentioned in the notice.
 
 | observed | marker | exit | meaning |
 |---|---|---|---|
-| status `idle` / `done` / `working` / `unknown`, prompt exit 0 | `accepted` | 0 | text + Enter written; cohort acknowledged (`--retry-until injected`). A working agent queues the notice into its turn |
-| status `blocked`, or prompt returns `agent_blocked` | `deferred` | 1 | approval / question UI; amq retries on its ladder (5s base, 2m cap, no budget spent) |
+| prompt exit 0 | `accepted` | 0 | text + Enter written; cohort acknowledged (`--retry-until injected`). A working agent queues the notice into its turn |
+| prompt returns `agent_blocked` | `deferred` | 1 | approval / question UI; amq retries on its ladder (5s base, 2m cap, no budget spent) |
 | `agent_not_found`, `agent_prompt_stalled`, timeout, usage | `failed` | 1 | terminal for this cohort; a new inbox change re-arms |
 
 `deferred` must exit non-zero: amq's `classifyInjectViaResult` treats a
@@ -131,7 +143,7 @@ reply. Inspect with `herdr plugin action invoke est7.amq-adapter.status` and
 ## Layout
 
 - `internal/adapter/` — pure core: `Decide` (event → action), `ChooseHandle`,
-  `AddAgent`, `Notice`, `ClassifyPromptResult` + `GateOnStatus`, `Plan`
+  `AgentsWith`, `Notice`, `ClassifyPromptResult`, `Plan`
   (reconcile diff), `AmqWakeArgs`; shell: `Store`, `Herdr`, `Spawn`, root helpers.
 - `cmd/herdr-amq-adapter/` — `hook`, `reconcile`, `inject`, `status`.
 - `skills/herdr-amq-adapter/SKILL.md` — the agent-facing prompt contract.
@@ -152,7 +164,22 @@ drives it:
   the other reaches through an SSH tunnel), and applies inbound envelopes
   into the real agent's inbox, where the ordinary waker rings the doorbell;
 - the dialing side syncs agent inventories both ways over SSH every 30s, so
-  alias mailboxes appear and disappear with the agents.
+  route inventories follow agent arrivals and departures. Existing mailbox
+  data is retained.
+
+Broadcasts preserve the original message id, thread, and refs. AMQ 0.80.1's
+spool has one filename per sender/message id, so each destination gets a
+successive turn at that slot. The adapter records exact enqueued bytes under
+`amq-root/bridge/forwarded/<sender>/<id>__<escaped-destination>.md` before
+consuming the alias copy. Earlier `sent/` bytes are preserved in its `archive/`
+subdirectory before the slot is reused. Destination-bound transport receipts
+recover sends made before these markers existed. Incomplete spool files
+(especially a missing `.dest`) are reported and block that sender's push;
+they are never sent using an arbitrary default destination.
+
+The rendezvous syncs both the envelope file and its containing directory before
+returning `transport_accepted`. A failed persistence step returns an error;
+replays repeat the durability step before acknowledging.
 
 Pair from the machine that can SSH to the other. The peer needs Herdr with
 this plugin linked (and reconciled once), `amq` and `amq-bridge` installed
@@ -180,12 +207,33 @@ Replies: a bridged message is stored under a transfer file name, and amq
 instead. Thread ids survive the hop, so `amq thread --id` shows the whole
 exchange on both machines.
 
+## Status popup
+
+Open the read-only dashboard from the Herdr plugin actions, or run:
+
+```bash
+herdr plugin action invoke est7.amq-adapter.dashboard
+# Equivalent:
+herdr plugin pane open --plugin est7.amq-adapter --entrypoint status
+```
+
+The popup refreshes every five seconds. `r` refreshes, `j`/`k` scroll, and
+`q`/Escape closes it. It shows local waker state and unread messages, remote
+route inventory with its last successful sync time, runner freshness, relay
+reachability, alias/spool backlog, quarantine, and read errors. Remote inventory
+is a last-known route, not proof that a remote agent is online. Older peer files
+show an unknown sync time until a new runner successfully exchanges inventory.
+
+`status-popup --once` prints one snapshot for terminal inspection. Spool counts
+include only `.md` messages, never `.dest` sidecars. `bridge status --json`
+reports unreadable sections through `errors` and exits nonzero; an unavailable
+spool inventory is `null`, not an empty map. A per-alias count of `-1` means the
+read failed. Full per-message end-to-end doctor tracing is not implemented.
+
 ## Known gaps
 
-- Status read and prompt are two calls; an agent that opens an approval
-  dialog in between gets the notice as a keystroke into that dialog (Herdr
-  refuses the prompt when it already sees `blocked`, so the window is the
-  gap between the two calls).
+- Herdr's prompt success proves terminal submission, not agent consumption.
+  The popup does not claim a drained receipt from a successful injection.
 - One shared root per user, not per project; handles are global across
   Herdr workspaces.
 - Unix only (`setsid`).

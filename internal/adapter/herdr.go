@@ -76,23 +76,13 @@ func (h Herdr) AgentGet(ctx context.Context, target string) (AgentInfo, bool, er
 	return resp.Result.Agent, true, nil
 }
 
-// Prompt gates on the agent's live status, then submits text to the agent
-// hosted by target without --wait and returns the classified outcome. The
+// Prompt submits without --wait; Herdr owns the blocked check
+// and returns agent_blocked before sending input. The
 // whole call must stay under amq's --inject-timeout (5s default) so amq sees
 // our marker, not its own timeout.
 func (h Herdr) Prompt(target, text string, timeout time.Duration) (Outcome, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	info, found, err := h.AgentGet(ctx, target)
-	if err != nil {
-		return Outcome{Progress: ProgressFailed, Code: "exec", Note: err.Error()}, err
-	}
-	if !found {
-		return Outcome{Progress: ProgressFailed, Code: "agent_not_found", Note: "no agent at " + target}, nil
-	}
-	if out, ready := GateOnStatus(info.AgentStatus); !ready {
-		return out, nil
-	}
 	_, errs, rc, err := h.run(ctx, "agent", "prompt", target, text)
 	if err != nil {
 		return Outcome{Progress: ProgressFailed, Code: "exec", Note: err.Error()}, err

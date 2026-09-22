@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+	"time"
 )
 
 var hostRe = regexp.MustCompile(`^[a-z0-9_][a-z0-9_-]{0,31}$`)
@@ -150,7 +151,8 @@ type Local struct {
 
 // Peer is one paired machine, stored in <configDir>/peers/<host>.json.
 type Peer struct {
-	Host string `json:"host"` // bridge host alias of the peer
+	InventoryUpdatedAt time.Time `json:"inventory_updated_at,omitempty"`
+	Host               string    `json:"host"` // bridge host alias of the peer
 	// Label is the Herdr saved-machine label, kept for the user; routing
 	// never depends on it.
 	Label string `json:"label,omitempty"`

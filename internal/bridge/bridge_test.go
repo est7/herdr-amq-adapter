@@ -116,10 +116,11 @@ func TestTickIsolatesMessagesAndQuarantinesGarbage(t *testing.T) {
 	script := `#!/bin/sh
 # enqueue --config CFG --dest-alias DEST ; stdin = message
 if [ "$1" = "enqueue" ]; then
-  cfg=$3; msg=$(cat)
+  cfg=$3; payload_file=$(mktemp); cat > "$payload_file"
   root=$(sed -E 's/.*"root":"([^"]*)".*/\1/' "$cfg"); src=$(sed -E 's/.*"source_handle":"([^"]*)".*/\1/' "$cfg")
-  id=$(printf '%s' "$msg" | sed -nE 's/^  "id": "([^"]*)",?$/\1/p' | head -1)
-  mkdir -p "$root/bridge/outbox/$src/new"; printf '%s' "$msg" > "$root/bridge/outbox/$src/new/$id.md"; exit 0
+  id=$(cat "$payload_file" | sed -nE 's/^  "id": "([^"]*)",?$/\1/p' | head -1)
+  mkdir -p "$root/bridge/outbox/$src/new"; cat "$payload_file" > "$root/bridge/outbox/$src/new/$id.md"; rm "$payload_file"
+  printf '%s' "$5" > "$root/bridge/outbox/$src/new/$id.dest"; exit 0
 fi
 # courier cycles: print nothing, succeed
 exit 0

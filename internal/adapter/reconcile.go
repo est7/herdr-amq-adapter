@@ -24,8 +24,9 @@ func Handle(a AgentInfo) (string, bool) {
 // amq cannot know: which pane the waker serves and the pane id baked into
 // its injector argv.
 type WakerRecord struct {
-	PaneID string `json:"pane_id"`
-	Handle string `json:"handle"`
+	ServerSocket string `json:"server_socket,omitempty"`
+	PaneID       string `json:"pane_id"`
+	Handle       string `json:"handle"`
 	// SpawnPaneID is the pane id in the waker's --inject-arg list. It stays
 	// what it was at spawn time even after `herdr pane move` re-keys PaneID,
 	// because amq identifies the waker by that exact argv.

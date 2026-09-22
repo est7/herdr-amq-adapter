@@ -1,7 +1,7 @@
 id = "est7.amq-adapter"
 name = "AMQ Adapter"
 version = "0.2.0"
-min_herdr_version = "0.9.0"
+min_herdr_version = "0.9.1"
 description = "Agents in Herdr panes message each other over AMQ with zero config: auto-named handles, one shared root, delivery via `herdr agent prompt`."
 platforms = ["linux", "macos"]
 
@@ -47,3 +47,16 @@ command = ["bin/herdr-amq-adapter", "bridge", "status"]
 id = "bridge-ensure"
 title = "AMQ: start or reload the cross-machine bridge"
 command = ["bin/herdr-amq-adapter", "bridge", "ensure"]
+
+[[panes]]
+id = "status"
+title = "AMQ 通信状态"
+placement = "popup"
+width = "90%"
+height = "80%"
+command = ["bin/herdr-amq-adapter", "status-popup"]
+
+[[actions]]
+id = "dashboard"
+title = "AMQ: 通信状态"
+command = ["bin/herdr-amq-adapter", "dashboard"]
