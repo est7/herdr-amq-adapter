@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -144,7 +145,10 @@ func bridgeRun() error {
 	if !ok {
 		return errors.New("bridge is not configured; run `peer add` first")
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	// SIGTERM/SIGINT cancel the context, which kills the ssh tunnel and any
+	// courier in flight; without this a stopped runner leaves an orphan
+	// tunnel holding the loopback port.
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 	if benv.Local.RendezvousPort > 0 {
 		store, err := rendezvous.Open(filepath.Join(e.stateDir, "bridge", "rendezvous"))
@@ -201,6 +205,7 @@ func bridgeRun() error {
 		}
 		select {
 		case <-ctx.Done():
+			fmt.Println("bridge run: stopping")
 			return nil
 		case <-time.After(tickEvery):
 		}
