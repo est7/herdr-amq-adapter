@@ -3,6 +3,7 @@ package bridge
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -180,5 +181,53 @@ func TestSpoolsWithWorkSurfacesIOErrors(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(spool, 0o700) })
 	if _, err := spoolsWithWork(root); err == nil {
 		t.Error("unreadable spool must be an error, not empty")
+	}
+}
+
+func TestRendezvousRoleTransitions(t *testing.T) {
+	var l Local
+	var p Peer
+	ApplyRendezvousRole(&l, &p, true, 18790)
+	if l.RendezvousPort != 18790 || p.RendezvousPort != 0 {
+		t.Fatalf("here: %+v %+v", l, p)
+	}
+	ApplyRendezvousRole(&l, &p, false, 18790)
+	if l.RendezvousPort != 0 || p.RendezvousPort != 18790 {
+		t.Fatalf("here->there must clear the local port: %+v %+v", l, p)
+	}
+	ApplyRendezvousRole(&l, &p, true, 19000)
+	if l.RendezvousPort != 19000 || p.RendezvousPort != 0 {
+		t.Fatalf("there->here must clear the peer port: %+v %+v", l, p)
+	}
+}
+
+func TestUpdateLocalHostIsImmutableInsideTheLock(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := UpdateLocal(dir, func(l *Local) { l.Host = "mac" }); err != nil {
+		t.Fatal(err)
+	}
+	// A competing writer that observed no config before the lock still
+	// cannot rename the host: the check runs on the locked read.
+	if _, err := UpdateLocal(dir, func(l *Local) { l.Host = "other" }); !errors.Is(err, ErrHostImmutable) {
+		t.Fatalf("rename accepted: %v", err)
+	}
+	if l, err := UpdateLocal(dir, func(l *Local) { l.Host = "mac"; l.RendezvousPort = 1 }); err != nil || l.RendezvousPort != 1 {
+		t.Fatalf("same-host update refused: %+v %v", l, err)
+	}
+	if _, err := UpdatePeer(dir, "heping", func(p *Peer) { p.SSHTarget = "-Fevil" }); err == nil {
+		t.Error("ssh target starting with a dash must be rejected")
+	}
+}
+
+func TestValidSSHTarget(t *testing.T) {
+	for _, ok := range []string{"remote_heping", "ada@heping.local", "heping", "h-1"} {
+		if err := ValidSSHTarget(ok); err != nil {
+			t.Errorf("%q rejected: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"-Fx", "-oProxyCommand=id", "host name", "h;id", "", "h`x`"} {
+		if err := ValidSSHTarget(bad); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
 	}
 }

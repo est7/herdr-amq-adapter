@@ -27,6 +27,30 @@ func ValidRemotePath(p string) error {
 	return nil
 }
 
+// sshTargetRe: an OpenSSH destination (host alias, user@host, host:port
+// forms are handled by ssh config); never something ssh could parse as an
+// option, and no shell-significant characters.
+var sshTargetRe = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.@-]*$`)
+
+// ValidSSHTarget accepts a plain OpenSSH destination.
+func ValidSSHTarget(t string) error {
+	if !sshTargetRe.MatchString(t) {
+		return fmt.Errorf("ssh target %q must match %s", t, sshTargetRe)
+	}
+	return nil
+}
+
+// ApplyRendezvousRole sets both sides of the one-rendezvous invariant for
+// a pairing: exactly one of Local.RendezvousPort / Peer.RendezvousPort is
+// non-zero after any transition (here -> there or there -> here).
+func ApplyRendezvousRole(l *Local, p *Peer, here bool, port int) {
+	if here {
+		l.RendezvousPort, p.RendezvousPort = port, 0
+	} else {
+		l.RendezvousPort, p.RendezvousPort = 0, port
+	}
+}
+
 // ValidHost is amq-bridge's host alias grammar (also a valid Herdr name
 // prefix, so <host>-<agent> stays a legal handle).
 func ValidHost(h string) error {
@@ -81,20 +105,30 @@ func SaveLocal(configDir string, l Local) error {
 	return writeJSON(localPath(configDir), l)
 }
 
+// ErrHostImmutable is returned when an update would rename this machine's
+// bridge identity; the host names the key peers trust, so it can only be
+// set once (pair again to change it).
+var ErrHostImmutable = errors.New("bridge host identity is immutable once set")
+
 // UpdateLocal applies fn to the current local config under the config
 // lock, so concurrent writers (peer add, peer accept over SSH, the runner)
-// never clobber each other's fields.
+// never clobber each other's fields. The host immutability rule is
+// checked inside the lock against what fn produced.
 func UpdateLocal(configDir string, fn func(*Local)) (Local, error) {
 	unlock, err := lockConfig(configDir)
 	if err != nil {
 		return Local{}, err
 	}
 	defer unlock()
-	l, _, err := LoadLocal(configDir)
+	l, existed, err := LoadLocal(configDir)
 	if err != nil {
 		return Local{}, err
 	}
+	before := l.Host
 	fn(&l)
+	if existed && before != "" && l.Host != before {
+		return Local{}, fmt.Errorf("%w: is %q, update wanted %q", ErrHostImmutable, before, l.Host)
+	}
 	return l, SaveLocal(configDir, l)
 }
 
@@ -113,6 +147,11 @@ func UpdatePeer(configDir, host string, fn func(*Peer)) (Peer, error) {
 	fn(&p)
 	if p.RemoteAdapter != "" {
 		if err := ValidRemotePath(p.RemoteAdapter); err != nil {
+			return Peer{}, err
+		}
+	}
+	if p.SSHTarget != "" {
+		if err := ValidSSHTarget(p.SSHTarget); err != nil {
 			return Peer{}, err
 		}
 	}

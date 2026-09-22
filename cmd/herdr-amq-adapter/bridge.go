@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -137,6 +138,8 @@ func bridgeRun() error {
 		return nil
 	}
 	defer lock.Close()
+	_ = lock.Truncate(0)
+	_, _ = lock.WriteAt([]byte(fmt.Sprint(os.Getpid())), 0)
 	benv, ok, err := bridgeEnv(e)
 	if err != nil {
 		return err
@@ -146,23 +149,48 @@ func bridgeRun() error {
 	}
 	// SIGTERM/SIGINT cancel the context, which kills the ssh tunnel and any
 	// courier in flight; without this a stopped runner leaves an orphan
-	// tunnel holding the loopback port.
+	// tunnel holding the loopback port. SIGHUP asks for an immediate config
+	// reload (bridge ensure sends it after a pairing change).
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
-	if benv.Local.RendezvousPort > 0 {
-		store, err := rendezvous.Open(filepath.Join(e.stateDir, "bridge", "rendezvous"))
-		if err != nil {
-			return err
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	store, err := rendezvous.Open(filepath.Join(e.stateDir, "bridge", "rendezvous"))
+	if err != nil {
+		return err
+	}
+	var srv *http.Server
+	servingPort := 0
+	serveRendezvous := func(port int) error {
+		if port == servingPort {
+			return nil
 		}
-		ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", benv.Local.RendezvousPort))
+		if srv != nil {
+			_ = srv.Close()
+			srv, servingPort = nil, 0
+			fmt.Println("rendezvous stopped")
+		}
+		if port == 0 {
+			return nil
+		}
+		ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 		if err != nil {
 			return fmt.Errorf("rendezvous listen: %w", err)
 		}
-		srv := &http.Server{Handler: store.Handler(), ReadHeaderTimeout: 10 * time.Second}
-		go func() { _ = srv.Serve(ln) }()
-		defer srv.Close()
+		srv = &http.Server{Handler: store.Handler(), ReadHeaderTimeout: 10 * time.Second}
+		servingPort = port
+		go func(s *http.Server) { _ = s.Serve(ln) }(srv)
 		fmt.Printf("rendezvous serving on %s\n", ln.Addr())
+		return nil
 	}
+	if err := serveRendezvous(benv.Local.RendezvousPort); err != nil {
+		return err
+	}
+	defer func() {
+		if srv != nil {
+			_ = srv.Close()
+		}
+	}()
 	tunnels := map[string]context.CancelFunc{}
 	reconcileTunnels := func(peers []bridge.Peer) {
 		want := map[string]bridge.Peer{}
@@ -189,8 +217,10 @@ func bridgeRun() error {
 	}
 	reconcileTunnels(benv.Peers)
 	lastInventory := time.Time{}
+	reloadNow := false
 	for {
-		if time.Since(lastInventory) >= inventoryEvery {
+		if reloadNow || time.Since(lastInventory) >= inventoryEvery {
+			reloadNow = false
 			for _, p := range benv.Peers {
 				if p.SSHTarget == "" {
 					continue
@@ -204,10 +234,10 @@ func bridgeRun() error {
 			if err != nil || !ok {
 				return fmt.Errorf("reload bridge config: %v", err)
 			}
-			if fresh.Local.RendezvousPort != benv.Local.RendezvousPort {
-				return fmt.Errorf("rendezvous port changed (%d -> %d); restart bridge run", benv.Local.RendezvousPort, fresh.Local.RendezvousPort)
-			}
 			benv = fresh
+			if err := serveRendezvous(benv.Local.RendezvousPort); err != nil {
+				fmt.Printf("rendezvous: %v\n", err)
+			}
 			reconcileTunnels(benv.Peers)
 			if err := ensureAliasMailboxes(ctx, e, benv.Peers); err != nil {
 				fmt.Printf("alias mailboxes: %v\n", err)
@@ -232,6 +262,9 @@ func bridgeRun() error {
 		case <-ctx.Done():
 			fmt.Println("bridge run: stopping")
 			return nil
+		case <-hup:
+			fmt.Println("bridge run: reload requested")
+			reloadNow = true
 		case <-time.After(tickEvery):
 		}
 	}
@@ -242,9 +275,11 @@ func bridgeRun() error {
 func keepTunnel(ctx context.Context, p bridge.Peer) {
 	backoff := time.Second
 	for {
-		cmd := exec.CommandContext(ctx, "ssh", "-N", "-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes",
-			"-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "-o", "ConnectTimeout=10",
-			"-L", fmt.Sprintf("127.0.0.1:%d:127.0.0.1:%d", p.RendezvousPort, p.RendezvousPort), p.SSHTarget)
+		if err := bridge.ValidSSHTarget(p.SSHTarget); err != nil {
+			fmt.Printf("tunnel %s: %v\n", p.Host, err)
+			return
+		}
+		cmd := exec.CommandContext(ctx, "ssh", tunnelArgs(p)...)
 		var errb bytes.Buffer
 		cmd.Stderr = &errb
 		started := time.Now()
@@ -273,6 +308,14 @@ func keepTunnel(ctx context.Context, p bridge.Peer) {
 // ValidRemotePath, subcommand words are plugin constants, and values are
 // validated at their source (host aliases by ValidHost, handles by amq's
 // own grammar before they ever reach a record). Data travels on stdin.
+// tunnelArgs is the pure argv for the rendezvous tunnel; options end at
+// "--" so the target can never be read as one.
+func tunnelArgs(p bridge.Peer) []string {
+	return []string{"-N", "-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes",
+		"-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "-o", "ConnectTimeout=10",
+		"-L", fmt.Sprintf("127.0.0.1:%d:127.0.0.1:%d", p.RendezvousPort, p.RendezvousPort), "--", p.SSHTarget}
+}
+
 func sshAdapter(ctx context.Context, p bridge.Peer, stdin []byte, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, sshTimeout)
 	defer cancel()
@@ -281,6 +324,9 @@ func sshAdapter(ctx context.Context, p bridge.Peer, stdin []byte, args ...string
 		remote = "~/.local/bin/herdr-amq-adapter"
 	}
 	if err := bridge.ValidRemotePath(remote); err != nil {
+		return nil, err
+	}
+	if err := bridge.ValidSSHTarget(p.SSHTarget); err != nil {
 		return nil, err
 	}
 	for _, a := range args {
@@ -336,9 +382,10 @@ func ensureAliasMailboxes(ctx context.Context, e env, peers []bridge.Peer) error
 	return nil
 }
 
-// bridgeEnsure starts `bridge run` detached when the bridge is configured;
-// a second instance exits on the run lock, so this is safe to call from
-// every reconcile.
+// bridgeEnsure starts `bridge run` detached when the bridge is configured.
+// When an instance already runs it is asked to reload (SIGHUP) instead, so
+// a pairing change takes effect immediately and no second instance is
+// ever spawned only to exit on the lock.
 func bridgeEnsure() error {
 	e, err := loadEnv()
 	if err != nil {
@@ -346,6 +393,12 @@ func bridgeEnsure() error {
 	}
 	if _, ok, err := bridge.LoadLocal(e.configDir); err != nil || !ok {
 		return err
+	}
+	if pid, running := runningBridgePID(e); running {
+		if err := syscall.Kill(pid, syscall.SIGHUP); err == nil {
+			fmt.Printf("bridge run pid=%d reloading\n", pid)
+			return nil
+		}
 	}
 	if err := os.MkdirAll(e.logs, 0o755); err != nil {
 		return err
@@ -390,14 +443,10 @@ func bridgeStatus() error {
 	for _, p := range peers {
 		fmt.Printf("peer %s label=%s ssh=%s rendezvous_port=%d agents=%s\n", p.Host, p.Label, p.SSHTarget, p.RendezvousPort, strings.Join(p.Agents, ","))
 	}
-	lock, err := os.OpenFile(filepath.Join(e.stateDir, "bridge", "run.lock"), os.O_RDWR, 0)
-	if err == nil {
-		defer lock.Close()
-		if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-			fmt.Println("bridge run: running")
-		} else {
-			fmt.Println("bridge run: not running")
-		}
+	if pid, running := runningBridgePID(e); running {
+		fmt.Printf("bridge run: running pid=%d\n", pid)
+	} else {
+		fmt.Println("bridge run: not running")
 	}
 	return nil
 }
@@ -419,6 +468,9 @@ func peerAdd(args []string) error {
 	}
 	if *target == "" {
 		return errors.New("--ssh is required")
+	}
+	if err := bridge.ValidSSHTarget(*target); err != nil {
+		return err
 	}
 	if *host == "" {
 		*host = *label
@@ -452,11 +504,6 @@ func peerAdd(args []string) error {
 	}
 	if e.bridgeBin == "" {
 		return errors.New("amq-bridge not found on PATH (set AMQ_BRIDGE_BIN)")
-	}
-	if existing, ok, err := bridge.LoadLocal(e.configDir); err != nil {
-		return err
-	} else if ok && existing.Host != *me {
-		return fmt.Errorf("this machine is already bridge host %q; pass --me %s", existing.Host, existing.Host)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
@@ -494,18 +541,17 @@ func peerAdd(args []string) error {
 	if err := bridge.Trust(e.root, *host, accepted.Public); err != nil {
 		return err
 	}
+	var scratch bridge.Peer
 	local, err := bridge.UpdateLocal(e.configDir, func(l *bridge.Local) {
 		l.Host = *me
-		if *rendezvous == "here" {
-			l.RendezvousPort = *port
-		}
+		bridge.ApplyRendezvousRole(l, &scratch, *rendezvous == "here", *port)
 	})
 	if err != nil {
 		return err
 	}
 	peer, err = bridge.UpdatePeer(e.configDir, *host, func(p *bridge.Peer) {
 		p.Label, p.SSHTarget, p.RemoteAdapter = peer.Label, peer.SSHTarget, peer.RemoteAdapter
-		p.RendezvousPort = peer.RendezvousPort
+		p.RendezvousPort = scratch.RendezvousPort
 		p.Agents = accepted.Agents
 	})
 	if err != nil {
@@ -584,25 +630,15 @@ func peerAccept(args []string) error {
 	if err := bridge.Trust(e.root, *peerHost, string(record)); err != nil {
 		return err
 	}
-	if existing, ok, err := bridge.LoadLocal(e.configDir); err != nil {
-		return err
-	} else if ok && existing.Host != *host {
-		return fmt.Errorf("this machine is already bridge host %q, not %q", existing.Host, *host)
-	}
+	var scratch bridge.Peer
 	if _, err := bridge.UpdateLocal(e.configDir, func(l *bridge.Local) {
 		l.Host = *host
-		if *here {
-			l.RendezvousPort = *port
-		}
+		bridge.ApplyRendezvousRole(l, &scratch, *here, *port)
 	}); err != nil {
 		return err
 	}
 	if _, err := bridge.UpdatePeer(e.configDir, *peerHost, func(p *bridge.Peer) {
-		if !*here {
-			p.RendezvousPort = *port
-		} else {
-			p.RendezvousPort = 0
-		}
+		p.RendezvousPort = scratch.RendezvousPort
 	}); err != nil {
 		return err
 	}
@@ -666,4 +702,23 @@ func peerAliases(args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	return ensureAliasMailboxes(ctx, e, []bridge.Peer{p})
+}
+
+// runningBridgePID reports the pid holding the run lock, if any.
+func runningBridgePID(e env) (int, bool) {
+	lock, err := os.OpenFile(filepath.Join(e.stateDir, "bridge", "run.lock"), os.O_RDWR, 0)
+	if err != nil {
+		return 0, false
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
+		_ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+		return 0, false
+	}
+	b, _ := io.ReadAll(lock)
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil || pid <= 0 {
+		return 0, true
+	}
+	return pid, true
 }
