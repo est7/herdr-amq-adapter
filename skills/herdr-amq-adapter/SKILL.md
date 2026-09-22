@@ -78,8 +78,13 @@ them is ordinary `amq send --to heping-codex`; nothing else changes.
 - A remote agent needs an explicit working directory. Local defaults to
   the caller's cwd; remote has no such anchor. Use the directory the user
   gave (absolute or `~/`), else the only live workspace on that machine
-  (`herdr --machine <label> workspace list`), else ask. Set it with
-  `pane split --cwd`; `agent start` inherits the pane's cwd.
+  (`herdr --machine <label> workspace list`), else ask.
+- Where the new agent lives follows the project, on any machine: same
+  project directory as an existing pane, split that pane
+  (`pane split <id> --cwd <dir> --no-focus`); a different project
+  directory, open a new tab in that workspace
+  (`tab create --workspace <id> --cwd <dir> --label <project>`) and start
+  the agent in its root pane. `agent start` inherits the pane's cwd.
 - Reply to a `<machine>-<agent>` sender with
   `amq send --to <sender> --thread <thread> --body …`, quoting the thread
   from the message; `amq reply --id` cannot find bridged messages.
