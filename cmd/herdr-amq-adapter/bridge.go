@@ -24,6 +24,53 @@ import (
 	"github.com/est7/herdr-amq-adapter/internal/rendezvous"
 )
 
+// topologyPlan is the ordered set of changes that moves the runner from
+// one configuration to the next: tunnels to stop (they may hold the port a
+// local rendezvous is about to bind), the listener port to serve (0 for
+// none), tunnels to start last.
+type topologyPlan struct {
+	StopTunnels  []string
+	ServePort    int
+	StartTunnels []bridge.Peer
+	Rebind       bool
+}
+
+func tunnelKey(p bridge.Peer) string {
+	return p.Host + "|" + p.SSHTarget + "|" + fmt.Sprint(p.RendezvousPort)
+}
+
+// planTopology is pure so the ordering rules can be tested without
+// processes: stop first, rebind second (bind-before-close is the
+// executor's job), start last; unchanged tunnels are untouched.
+func planTopology(runningTunnels map[string]bool, servingPort int, next bridge.Env) topologyPlan {
+	want := map[string]bridge.Peer{}
+	for _, p := range next.Peers {
+		if p.SSHTarget != "" && p.RendezvousPort > 0 {
+			want[tunnelKey(p)] = p
+		}
+	}
+	var plan topologyPlan
+	for key := range runningTunnels {
+		if _, still := want[key]; !still {
+			plan.StopTunnels = append(plan.StopTunnels, key)
+		}
+	}
+	sort.Strings(plan.StopTunnels)
+	plan.ServePort = next.Local.RendezvousPort
+	plan.Rebind = next.Local.RendezvousPort != servingPort
+	keys := make([]string, 0, len(want))
+	for key := range want {
+		if !runningTunnels[key] {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		plan.StartTunnels = append(plan.StartTunnels, want[key])
+	}
+	return plan
+}
+
 // Cross-machine federation. Every machine keeps its own root; the plugin on
 // each side runs `bridge run`, which forwards alias-mailbox mail into
 // amq-bridge spools, pushes and polls the rendezvous, and (on the dialing
@@ -226,55 +273,51 @@ func bridgeRun() error {
 		done   chan struct{}
 	}
 	tunnels := map[string]tunnel{}
-	tunnelKey := func(p bridge.Peer) string { return p.Host + "|" + p.SSHTarget + "|" + fmt.Sprint(p.RendezvousPort) }
-	// stopObsoleteTunnels cancels tunnels no longer wanted and waits for
-	// their ssh to exit, so a port they held is free before anything else
-	// (a local rendezvous after there->here) tries to bind it.
-	stopObsoleteTunnels := func(peers []bridge.Peer) {
-		want := map[string]bool{}
-		for _, p := range peers {
-			if p.SSHTarget != "" && p.RendezvousPort > 0 {
-				want[tunnelKey(p)] = true
-			}
+	running := func() map[string]bool {
+		m := map[string]bool{}
+		for k := range tunnels {
+			m[k] = true
 		}
-		for key, t := range tunnels {
-			if !want[key] {
-				t.cancel()
-				<-t.done
-				delete(tunnels, key)
-				fmt.Printf("tunnel %s stopped\n", key)
-			}
-		}
+		return m
 	}
-	startWantedTunnels := func(peers []bridge.Peer) {
-		for _, p := range peers {
-			if p.SSHTarget == "" || p.RendezvousPort == 0 {
-				continue
-			}
-			key := tunnelKey(p)
-			if _, running := tunnels[key]; running {
-				continue
-			}
-			tctx, tcancel := context.WithCancel(ctx)
-			done := make(chan struct{})
-			tunnels[key] = tunnel{cancel: tcancel, done: done}
-			go func(p bridge.Peer) { defer close(done); keepTunnel(tctx, p) }(p)
-		}
+	startTunnel := func(p bridge.Peer) {
+		tctx, tcancel := context.WithCancel(ctx)
+		done := make(chan struct{})
+		tunnels[tunnelKey(p)] = tunnel{cancel: tcancel, done: done}
+		go func() { defer close(done); keepTunnel(tctx, p) }()
 	}
-	// applyTopology commits a new configuration in a safe order: obsolete
-	// tunnels first (they may hold the port), then the rendezvous listener
-	// (bind-before-close), then new tunnels. A failed bind keeps the old
-	// listener and reports; the caller retries on the next reload.
+	// applyTopology executes a plan in its order: obsolete tunnels are
+	// cancelled and awaited (they may hold the port), the listener is
+	// rebound bind-before-close, new tunnels start last. A failed bind keeps
+	// the old listener, restores the old tunnels and reports; the next
+	// reload retries.
 	applyTopology := func(next bridge.Env) error {
-		stopObsoleteTunnels(next.Peers)
-		if err := serveRendezvous(next.Local.RendezvousPort); err != nil {
-			startWantedTunnels(benv.Peers)
-			return err
+		plan := planTopology(running(), servingPort, next)
+		for _, key := range plan.StopTunnels {
+			t := tunnels[key]
+			t.cancel()
+			<-t.done
+			delete(tunnels, key)
+			fmt.Printf("tunnel %s stopped\n", key)
 		}
-		startWantedTunnels(next.Peers)
+		if plan.Rebind {
+			if err := serveRendezvous(plan.ServePort); err != nil {
+				for _, p := range benv.Peers {
+					if _, up := tunnels[tunnelKey(p)]; p.SSHTarget != "" && p.RendezvousPort > 0 && !up {
+						startTunnel(p)
+					}
+				}
+				return err
+			}
+		}
+		for _, p := range plan.StartTunnels {
+			startTunnel(p)
+		}
 		return nil
 	}
-	startWantedTunnels(benv.Peers)
+	for _, p := range planTopology(nil, servingPort, benv).StartTunnels {
+		startTunnel(p)
+	}
 	lastInventory := time.Time{}
 	markerSeen := markerTime(reloadMarker(e))
 	rs := runnerStatus{Version: version, PID: os.Getpid(), StartedAt: time.Now()}
@@ -757,24 +800,65 @@ func peerAdd(args []string) error {
 	return nil
 }
 
-// installRemoteAdapter copies this binary to the peer when the remote path
-// has none. Same OS/arch is assumed for v1; a mismatch fails at first use.
+// remoteInstallAction decides what installRemoteAdapter does from one
+// probe of the peer: its `uname -sm`, and the adapter's `version` output
+// there (empty when the binary is missing or not executable).
+//
+//	"keep"    the peer runs this build already
+//	"install" nothing there, or a different build: copy this binary over
+//	error     the peer is another OS/arch (this binary cannot run there)
+func remoteInstallAction(localPlatform, remotePlatform, localVersion, remoteVersion string) (string, error) {
+	if strings.TrimSpace(remotePlatform) != strings.TrimSpace(localPlatform) {
+		return "", fmt.Errorf("peer is %q, this build is for %q; install the plugin there from source and pass --remote-adapter", strings.TrimSpace(remotePlatform), strings.TrimSpace(localPlatform))
+	}
+	if remoteVersion != "" && strings.TrimSpace(remoteVersion) == strings.TrimSpace(localVersion) {
+		return "keep", nil
+	}
+	return "install", nil
+}
+
+// installRemoteAdapter puts this exact build at the peer's adapter path:
+// missing or different build gets a copy (written to a temp name and
+// renamed, so a running peer process is never half-overwritten); an SSH
+// failure is reported as such, never mistaken for "missing".
 func installRemoteAdapter(ctx context.Context, e env, p bridge.Peer) error {
 	if err := bridge.ValidRemotePath(p.RemoteAdapter); err != nil {
 		return err
 	}
-	probe := exec.CommandContext(ctx, "ssh", "-o", "BatchMode=yes", "--", p.SSHTarget, "test", "-x", p.RemoteAdapter)
-	if probe.Run() == nil {
+	ssh := func(args ...string) ([]byte, error) {
+		return exec.CommandContext(ctx, "ssh", append([]string{"-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "--", p.SSHTarget}, args...)...).CombinedOutput()
+	}
+	platform, err := ssh("uname", "-sm")
+	if err != nil {
+		return fmt.Errorf("ssh %s: %w: %s", p.SSHTarget, err, strings.TrimSpace(string(platform)))
+	}
+	local, _ := exec.Command("uname", "-sm").Output()
+	remoteVersion := ""
+	if out, err := ssh(p.RemoteAdapter, "version"); err == nil {
+		remoteVersion = string(out)
+	}
+	action, err := remoteInstallAction(string(local), string(platform), version, remoteVersion)
+	if err != nil {
+		return err
+	}
+	if action == "keep" {
 		return nil
 	}
 	dir := filepath.Dir(p.RemoteAdapter)
-	if out, err := exec.CommandContext(ctx, "ssh", "-o", "BatchMode=yes", "--", p.SSHTarget, "mkdir", "-p", dir).CombinedOutput(); err != nil {
+	if out, err := ssh("mkdir", "-p", dir); err != nil {
 		return fmt.Errorf("ssh mkdir: %w: %s", err, out)
 	}
-	if out, err := exec.CommandContext(ctx, "scp", "-q", "--", e.self, p.SSHTarget+":"+p.RemoteAdapter).CombinedOutput(); err != nil {
+	tmp := p.RemoteAdapter + ".new"
+	if out, err := exec.CommandContext(ctx, "scp", "-q", "--", e.self, p.SSHTarget+":"+tmp).CombinedOutput(); err != nil {
 		return fmt.Errorf("scp adapter: %w: %s", err, out)
 	}
-	fmt.Printf("installed adapter at %s:%s\n", p.SSHTarget, p.RemoteAdapter)
+	if out, err := ssh("chmod", "755", tmp); err != nil {
+		return fmt.Errorf("ssh chmod: %w: %s", err, out)
+	}
+	if out, err := ssh("mv", "-f", tmp, p.RemoteAdapter); err != nil {
+		return fmt.Errorf("ssh mv: %w: %s", err, out)
+	}
+	fmt.Printf("installed adapter %s at %s:%s (was %q)\n", version, p.SSHTarget, p.RemoteAdapter, strings.TrimSpace(remoteVersion))
 	return nil
 }
 
