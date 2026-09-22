@@ -40,9 +40,11 @@ Placement follows the project, on any machine:
 
 - `herdr --machine` reports the remote does not support machine API
   forwarding: that machine's Herdr is too old.
-- The agent starts but never appears in `amq who`: the plugin is not
-  linked on that machine, the machines are not paired, or fewer than about
-  30 seconds have passed since it was adopted.
+- The agent starts but never appears in `amq who`: check adoption and
+  pairing, then the status popup's runner, last successful inventory sync,
+  and errors. Inventory is attempted every 30 seconds; a stopped runner
+  or failed SSH exchange leaves old routes in place. An existing alias
+  likewise does not prove the remote agent is online.
 - The remote agent is `blocked` right after a doorbell: its own CLI is
   asking the user there to approve the `amq` command; only that user can
   answer.
