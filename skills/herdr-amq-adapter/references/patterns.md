@@ -17,11 +17,10 @@ orch's workflow presets; the mechanics are plain AMQ.
   exact markers named in the pattern (for example `verdict: approve`).
   Read the marker, then the findings. A reply without a marker is a
   `reject`.
-- **Bounded rounds.** Each pattern states a `max_rounds`. Reaching it
-  without `approve` ends the loop with the findings still open; report
-  them to the user instead of running another round.
-- **No-progress stop.** If a round's findings are the same set as the
-  previous round's (same ids, no fix landed), stop early and report.
+- **No-progress stop.** Rounds are not capped; the loop ends on
+  `approve`, or when a round's findings are the same set as the previous
+  round's (same ids, no fix landed), in which case stop and report the
+  open findings to the user.
 - **Stop when done.** After the final verdict, tell the user the outcome
   and the thread id. Reply to the peer only when the pattern needs
   another round.
@@ -29,7 +28,7 @@ orch's workflow presets; the mechanics are plain AMQ.
 ## review-loop
 
 Adversarial review of a change with a fix loop. Roles: `implementer`
-(usually you), `reviewer` (a peer). `max_rounds: 6`.
+(usually you), `reviewer` (a peer).
 
 1. Send the reviewer the brief plus the **audit** prompt.
 2. Wait for the doorbell. `verdict: approve` ends the loop.
@@ -78,7 +77,7 @@ yourself.
 ## harden
 
 Attack a change with tests instead of reviewing it. Roles:
-`implementer` (usually you), `attacker` (a peer). `max_rounds: 4`.
+`implementer` (usually you), `attacker` (a peer).
 Same loop shape as review-loop with these prompts.
 
 **attack**
@@ -103,7 +102,7 @@ Same loop shape as review-loop with these prompts.
 ## argue
 
 Debate among equals to converge on a claim set. Roles: `participant`,
-two or more (you may be one). `max_rounds: 5`.
+two or more (you may be one).
 
 1. Open one thread to all participants (`amq send --to a,b --thread
    <id>`) with the question and the **propose** prompt. Produce your
