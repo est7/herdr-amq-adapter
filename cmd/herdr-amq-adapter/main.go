@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/debug"
 	"text/tabwriter"
 	"time"
 
@@ -30,6 +31,42 @@ import (
 )
 
 const promptTimeout = 4 * time.Second // < amq --inject-timeout (5s)
+
+// version identifies the running build: -ldflags "-X main.version=<tag>"
+// when set, otherwise the VCS revision Go stamps into any build made from
+// a git checkout (which is how Herdr's [[build]] step and `plugin link`
+// produce it), with "-modified" for a dirty tree.
+var version = ""
+
+func init() {
+	if version != "" {
+		return
+	}
+	version = "unknown"
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return
+	}
+	rev, modified := "", false
+	for _, kv := range info.Settings {
+		switch kv.Key {
+		case "vcs.revision":
+			rev = kv.Value
+		case "vcs.modified":
+			modified = kv.Value == "true"
+		}
+	}
+	if rev == "" {
+		return
+	}
+	if len(rev) > 12 {
+		rev = rev[:12]
+	}
+	version = rev
+	if modified {
+		version += "-modified"
+	}
+}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -52,6 +89,8 @@ func main() {
 		err = runBridge(os.Args[2:])
 	case "peer":
 		err = runPeer(os.Args[2:])
+	case "version":
+		fmt.Println(version)
 	default:
 		usage()
 		os.Exit(2)
@@ -63,7 +102,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: herdr-amq-adapter hook|reconcile|status|inject <pane_id> <handle> <root> <payload>|rendezvous --listen <addr> --dir <dir>|bridge run|ensure|status|peer add|accept|agents|aliases")
+	fmt.Fprintln(os.Stderr, "usage: herdr-amq-adapter hook|reconcile|status|version|inject <pane_id> <handle> <root> <payload>|rendezvous --listen <addr> --dir <dir>|bridge run|ensure|status [--json]|peer add|accept|agents|aliases")
 }
 
 type env struct {
@@ -427,7 +466,7 @@ func runReconcile() error {
 	}
 	fmt.Printf("reconcile: live=%d stopped=%d started=%d\n", len(live), len(plan.Stop), len(plan.Start))
 	if err := bridgeEnsure(); err != nil {
-		fmt.Printf("bridge: %v\n", err)
+		return fmt.Errorf("wakers reconciled, but bridge: %w", err)
 	}
 	return nil
 }
@@ -443,19 +482,28 @@ func runStatus() error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	fmt.Printf("root: %s\n", e.root)
+	fmt.Printf("adapter: %s (%s)\nroot: %s\nlogs: %s\n", version, e.self, e.root, e.logs)
 	tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(tw, "PANE\tHANDLE\tWAKE\tPID\tCURRENT\tCWD")
+	var problems []string
 	for _, w := range wakers {
 		st, err := adapter.WakeCheck(ctx, e.amq, e.root, w.Handle)
 		wake, current := "error", false
 		if err == nil {
 			wake = st.Status
 			current = adapter.DecideWake(st, adapter.ExpectedTarget(e.self, w.Handle, w.ArgvPane(), e.root)) == adapter.DecisionKeep
+		} else {
+			problems = append(problems, fmt.Sprintf("%s: %v", w.Handle, err))
 		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%v\t%s\n", w.PaneID, w.Handle, wake, st.PID, current, w.Cwd)
 	}
-	return tw.Flush()
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	for _, p := range problems {
+		fmt.Println("wake check:", p)
+	}
+	return nil
 }
 
 // runInject is invoked by amq as `<self> inject <pane_id> <handle> <root> <payload>`.

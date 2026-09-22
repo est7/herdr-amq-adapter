@@ -19,19 +19,47 @@ agent A pane ──amq send --to claude──▶ shared AMQ root ──▶ amq w
 ## Install
 
 ```bash
-herdr plugin install est7/herdr-amq-adapter        # builds with `go build` on install
+herdr plugin install est7/herdr-amq-adapter        # runs `go build` on install
 # or, for development:
-go build -o bin/herdr-amq-adapter ./cmd/herdr-amq-adapter && herdr plugin link "$PWD"
+herdr plugin link "$PWD"                            # uses bin/ in this checkout; build it first
+go build -o bin/herdr-amq-adapter ./cmd/herdr-amq-adapter
 ```
 
-Requires Herdr ≥ 0.9.0 and `amq` on the PATH Herdr's server sees (or `AMQ_BIN`).
+Requirements:
+
+| what | version | why |
+|---|---|---|
+| Herdr | ≥ 0.9.0 (0.9.1 tested; `--machine` forwarding needs 0.9.1 on the remote) | plugin events, `agent prompt` |
+| Go | 1.27 (`go.mod`) | the `[[build]]` step |
+| `amq` | ≥ 0.80.1 (tested), on the PATH Herdr's server sees or `AMQ_BIN` | wakers, `wake check/retire/repair` |
+| `amq-bridge` | same release as `amq`, from the release tarball (not in Homebrew) into `~/.local/bin`, or `AMQ_BRIDGE_BIN` | cross-machine only |
+
+The plugin binary lives inside the plugin root (`bin/herdr-amq-adapter`;
+`herdr plugin list --json` prints `plugin_root`). Hooks and actions run it
+from there; for the CLI-only commands (`peer add`, `bridge status --json`,
+`version`) call it by that path or symlink it into `~/.local/bin`.
+
+**After installing or linking, run the reconcile action once:**
+
+```bash
+herdr plugin action invoke est7.amq-adapter.reconcile
+```
+
+Herdr runs `[[startup]]` at session restore and handoff, not when a plugin
+is linked or enabled, so agents already open in panes are adopted only by
+that first reconcile (later ones happen on every `pane.agent_detected`).
+
 Then give your agents the companion skill. This repo is a skill source with
 the standard `skills/<name>/SKILL.md` layout, so any skills manager that
 reads that layout can install it; the manual form is:
 
 ```bash
-ln -s "$PWD/skills/herdr-amq-adapter" ~/.claude/skills/herdr-amq-adapter   # Claude Code
+ln -s "<plugin_root>/skills/herdr-amq-adapter" ~/.claude/skills/herdr-amq-adapter   # Claude Code
 ```
+
+Actions (`herdr plugin action invoke est7.amq-adapter.<id>`): `reconcile`,
+`status`, `bridge-status`, `bridge-ensure`. `herdr-amq-adapter version`
+prints the build (VCS revision, `-modified` when dirty).
 
 ## What it does, zero-config
 
@@ -126,14 +154,21 @@ drives it:
 - the dialing side syncs agent inventories both ways over SSH every 30s, so
   alias mailboxes appear and disappear with the agents.
 
-Pair from the machine that can SSH to the other (the peer needs Herdr with
-this plugin linked, `amq` and `amq-bridge` installed; the adapter binary is
-copied over when missing):
+Pair from the machine that can SSH to the other. The peer needs Herdr with
+this plugin linked (and reconciled once), `amq` and `amq-bridge` installed
+at their usual paths; the adapter binary is copied over when the remote
+path has none (same OS and architecture assumed; pass `--remote-adapter`
+to point at the peer's plugin `bin/`):
 
 ```bash
-herdr-amq-adapter peer add --ssh remote_heping --label heping --me mac   # rendezvous served by heping
-herdr-amq-adapter bridge status
+<plugin_root>/bin/herdr-amq-adapter peer add --ssh remote_heping --label heping --me mac \
+    --remote-adapter /Users/ada/herdr-amq-adapter/bin/herdr-amq-adapter   # rendezvous served by heping
+herdr plugin action invoke est7.amq-adapter.bridge-status
 ```
+
+`bridge status` shows the runner's last tick, inventory exchange and error,
+a live probe of the rendezvous, pending spool and quarantine counts, and
+the log path; `--json` gives the same as one object.
 
 Host aliases (`--me`, `--label`/`--host`) are bridge identities: they name
 the Ed25519 keys both sides trust and prefix every alias mailbox. Changing

@@ -1,6 +1,6 @@
 id = "est7.amq-adapter"
 name = "AMQ Adapter"
-version = "0.1.0"
+version = "0.2.0"
 min_herdr_version = "0.9.0"
 description = "Agents in Herdr panes message each other over AMQ with zero config: auto-named handles, one shared root, delivery via `herdr agent prompt`."
 platforms = ["linux", "macos"]
@@ -37,3 +37,13 @@ command = ["bin/herdr-amq-adapter", "reconcile"]
 id = "status"
 title = "AMQ: waker status"
 command = ["bin/herdr-amq-adapter", "status"]
+
+[[actions]]
+id = "bridge-status"
+title = "AMQ: cross-machine bridge status"
+command = ["bin/herdr-amq-adapter", "bridge", "status"]
+
+[[actions]]
+id = "bridge-ensure"
+title = "AMQ: start or reload the cross-machine bridge"
+command = ["bin/herdr-amq-adapter", "bridge", "ensure"]

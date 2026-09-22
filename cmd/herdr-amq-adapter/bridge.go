@@ -39,7 +39,7 @@ const (
 
 func runBridge(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: herdr-amq-adapter bridge run|ensure|status")
+		return errors.New("usage: herdr-amq-adapter bridge run|ensure|status [--json]")
 	}
 	switch args[0] {
 	case "run":
@@ -47,9 +47,42 @@ func runBridge(args []string) error {
 	case "ensure":
 		return bridgeEnsure()
 	case "status":
-		return bridgeStatus()
+		return bridgeStatus(args[1:])
 	}
 	return fmt.Errorf("unknown bridge command %q", args[0])
+}
+
+// runnerStatus is what the runner publishes every tick to
+// <state>/bridge/status.json so an operator can see progress, not just
+// that a process holds the lock.
+type runnerStatus struct {
+	Version       string    `json:"version"`
+	PID           int       `json:"pid"`
+	StartedAt     time.Time `json:"started_at"`
+	LastTick      time.Time `json:"last_tick"`
+	LastInventory time.Time `json:"last_inventory,omitempty"`
+	LastError     string    `json:"last_error,omitempty"`
+	LastErrorAt   time.Time `json:"last_error_at,omitempty"`
+	RendezvousURL string    `json:"rendezvous_url"`
+	ServingPort   int       `json:"serving_port,omitempty"`
+	Tunnels       []string  `json:"tunnels,omitempty"`
+	Forwarded     int       `json:"forwarded_total"`
+	Pushed        int       `json:"pushed_total"`
+	Applied       int       `json:"applied_total"`
+	Refused       int       `json:"refused_total"`
+}
+
+func statusPath(e env) string { return filepath.Join(e.stateDir, "bridge", "status.json") }
+
+func writeStatus(e env, st runnerStatus) {
+	b, err := json.MarshalIndent(st, "", "  ")
+	if err != nil {
+		return
+	}
+	tmp := fmt.Sprintf("%s.%d.tmp", statusPath(e), os.Getpid())
+	if os.WriteFile(tmp, b, 0o600) == nil {
+		_ = os.Rename(tmp, statusPath(e))
+	}
 }
 
 func runPeer(args []string) error {
@@ -244,6 +277,12 @@ func bridgeRun() error {
 	startWantedTunnels(benv.Peers)
 	lastInventory := time.Time{}
 	markerSeen := markerTime(reloadMarker(e))
+	rs := runnerStatus{Version: version, PID: os.Getpid(), StartedAt: time.Now()}
+	noteErr := func(format string, args ...any) {
+		msg := fmt.Sprintf(format, args...)
+		fmt.Println(msg)
+		rs.LastError, rs.LastErrorAt = msg, time.Now()
+	}
 	for {
 		if now := markerTime(reloadMarker(e)); now.After(markerSeen) {
 			markerSeen = now
@@ -256,21 +295,22 @@ func bridgeRun() error {
 					continue
 				}
 				if err := syncInventory(ctx, e, benv.Local, p); err != nil {
-					fmt.Printf("inventory %s: %v\n", p.Host, err)
+					noteErr("inventory %s: %v", p.Host, err)
 				}
 			}
 			lastInventory = time.Now()
+			rs.LastInventory = lastInventory
 			fresh, ok, err := bridgeEnv(e)
 			if err != nil || !ok {
 				return fmt.Errorf("reload bridge config: %v", err)
 			}
 			if err := applyTopology(fresh); err != nil {
-				fmt.Printf("topology: %v (keeping previous)\n", err)
+				noteErr("topology: %v (keeping previous)", err)
 			} else {
 				benv = fresh
 			}
 			if err := ensureAliasMailboxes(ctx, e, benv.Peers); err != nil {
-				fmt.Printf("alias mailboxes: %v\n", err)
+				noteErr("alias mailboxes: %v", err)
 			}
 		}
 		tctx, tcancel := context.WithTimeout(ctx, tickEvery*4)
@@ -296,8 +336,20 @@ func bridgeRun() error {
 			fmt.Printf("diagnostic %s\n", d)
 		}
 		for _, err := range rep.Errors {
-			fmt.Printf("tick: %v\n", err)
+			noteErr("tick: %v", err)
 		}
+		rs.LastTick = time.Now()
+		rs.RendezvousURL, rs.ServingPort = benv.RendezvousURL, servingPort
+		rs.Tunnels = rs.Tunnels[:0]
+		for key := range tunnels {
+			rs.Tunnels = append(rs.Tunnels, key)
+		}
+		sort.Strings(rs.Tunnels)
+		rs.Forwarded += len(rep.Forwarded)
+		rs.Pushed += len(rep.Pushed)
+		rs.Applied += len(rep.Applied)
+		rs.Refused += len(rep.Refused)
+		writeStatus(e, rs)
 		select {
 		case <-ctx.Done():
 			fmt.Println("bridge run: stopping")
@@ -469,33 +521,121 @@ func bridgeEnsure() error {
 	return nil
 }
 
-func bridgeStatus() error {
+// bridgeStatus is the operator view: configuration, the runner's last
+// published progress, a live probe of the rendezvous, and what is waiting
+// in spools and quarantine. --json prints the same as one object.
+func bridgeStatus(args []string) error {
+	fs := flag.NewFlagSet("bridge status", flag.ContinueOnError)
+	asJSON := fs.Bool("json", false, "machine-readable output")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 	e, err := loadEnv()
 	if err != nil {
 		return err
 	}
-	local, ok, err := bridge.LoadLocal(e.configDir)
+	snap, err := bridge.LoadSnapshot(e.configDir)
 	if err != nil {
 		return err
 	}
-	if !ok {
-		fmt.Println("bridge: not configured")
+	view := map[string]any{
+		"adapter":    version,
+		"configured": snap.Configured,
+		"amq_bridge": e.bridgeBin,
+		"log":        filepath.Join(e.logs, "bridge.log"),
+	}
+	if !snap.Configured {
+		if *asJSON {
+			return json.NewEncoder(os.Stdout).Encode(view)
+		}
+		fmt.Println("bridge: not configured (run `peer add` on the machine that can ssh to the other)")
 		return nil
 	}
-	fmt.Printf("host: %s rendezvous_port_here: %d amq-bridge: %s\n", local.Host, local.RendezvousPort, e.bridgeBin)
-	peers, err := bridge.ListPeers(e.configDir)
-	if err != nil {
-		return err
+	view["host"] = snap.Local.Host
+	view["rendezvous_port_here"] = snap.Local.RendezvousPort
+	peers := make([]map[string]any, 0, len(snap.Peers))
+	for _, p := range snap.Peers {
+		peers = append(peers, map[string]any{"host": p.Host, "label": p.Label, "ssh": p.SSHTarget, "rendezvous_port": p.RendezvousPort, "agents": p.Agents})
 	}
-	for _, p := range peers {
+	view["peers"] = peers
+	view["running"] = bridgeRunning(e)
+	var rs runnerStatus
+	if b, err := os.ReadFile(statusPath(e)); err == nil && json.Unmarshal(b, &rs) == nil {
+		view["runner"] = rs
+	}
+	// live probe: can this host reach the rendezvous right now?
+	probe := "no rendezvous url"
+	if rs.RendezvousURL != "" {
+		client := &http.Client{Timeout: 3 * time.Second}
+		resp, err := client.Get(rs.RendezvousURL + "/v1/transfers?dest_alias=" + bridge.DestAlias(snap.Local.Host, "probe") + "&limit=1")
+		if err != nil {
+			probe = "unreachable: " + err.Error()
+		} else {
+			resp.Body.Close()
+			probe = resp.Status
+		}
+	}
+	view["rendezvous_probe"] = probe
+	pending := map[string]int{}
+	if spools, err := os.ReadDir(filepath.Join(e.root, "bridge", "outbox")); err == nil {
+		for _, sp := range spools {
+			if files, err := os.ReadDir(filepath.Join(e.root, "bridge", "outbox", sp.Name(), "new")); err == nil && len(files) > 0 {
+				pending[sp.Name()] = len(files)
+			}
+		}
+	}
+	view["pending_spool"] = pending
+	quarantined := map[string]int{}
+	for _, p := range snap.Peers {
+		for _, a := range p.Agents {
+			alias := bridge.AliasHandle(p.Host, a)
+			if files, err := os.ReadDir(filepath.Join(e.root, "agents", alias, "inbox", "quarantine")); err == nil && len(files) > 0 {
+				quarantined[alias] = len(files)
+			}
+		}
+	}
+	view["quarantined"] = quarantined
+	if *asJSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(view)
+	}
+	fmt.Printf("adapter %s; host %s; rendezvous here: %d; amq-bridge: %s\n", version, snap.Local.Host, snap.Local.RendezvousPort, e.bridgeBin)
+	for _, p := range snap.Peers {
 		fmt.Printf("peer %s label=%s ssh=%s rendezvous_port=%d agents=%s\n", p.Host, p.Label, p.SSHTarget, p.RendezvousPort, strings.Join(p.Agents, ","))
 	}
-	if bridgeRunning(e) {
-		fmt.Println("bridge run: running")
+	if view["running"].(bool) {
+		age := "never"
+		if !rs.LastTick.IsZero() {
+			age = time.Since(rs.LastTick).Round(time.Second).String() + " ago"
+		}
+		fmt.Printf("runner: running pid=%d (%s) last tick %s; inventory %s; forwarded=%d pushed=%d applied=%d refused=%d\n",
+			rs.PID, rs.Version, age, ageOf(rs.LastInventory), rs.Forwarded, rs.Pushed, rs.Applied, rs.Refused)
+		if rs.LastError != "" {
+			fmt.Printf("last error (%s): %s\n", ageOf(rs.LastErrorAt), rs.LastError)
+		}
+		if len(rs.Tunnels) > 0 {
+			fmt.Printf("tunnels: %s\n", strings.Join(rs.Tunnels, " "))
+		}
 	} else {
-		fmt.Println("bridge run: not running")
+		fmt.Println("runner: not running (reconcile or `bridge ensure` starts it)")
 	}
+	fmt.Printf("rendezvous %s: %s\n", rs.RendezvousURL, probe)
+	for k, v := range pending {
+		fmt.Printf("pending in spool %s: %d\n", k, v)
+	}
+	for k, v := range quarantined {
+		fmt.Printf("quarantined in %s: %d (inbox/quarantine)\n", k, v)
+	}
+	fmt.Printf("log: %s\n", filepath.Join(e.logs, "bridge.log"))
 	return nil
+}
+
+func ageOf(t time.Time) string {
+	if t.IsZero() {
+		return "never"
+	}
+	return time.Since(t).Round(time.Second).String() + " ago"
 }
 
 // peerAdd pairs this machine with one it can SSH to. It installs the
