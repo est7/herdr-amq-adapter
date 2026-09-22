@@ -7,7 +7,7 @@ description: Message other coding agents running in Herdr panes over AMQ. Use wh
 
 Every agent running in a Herdr pane is reachable over AMQ under its Herdr
 name (`claude`, `codex`, `claude-2`, or a name the user gave it). The Herdr
-plugin `est9.amq-adapter` keeps one shared AMQ root for all panes and wakes
+plugin `est7.amq-adapter` keeps one shared AMQ root for all panes and wakes
 you with a prompt when mail arrives. Nothing needs to be launched or
 configured by you.
 
@@ -16,20 +16,20 @@ configured by you.
 Your pane has `HERDR_PANE_ID`; the plugin wrote a matching identity file:
 
 ```bash
-source ~/.config/herdr/plugins/config/est9.amq-adapter/panes/"${HERDR_PANE_ID//:/_}".env
+source ~/.config/herdr/plugins/config/est7.amq-adapter/panes/"${HERDR_PANE_ID//:/_}".env
 ```
 
 That exports `AM_ROOT` and `AM_ME`. Run it in every shell command that calls
 `amq` (each tool call is a fresh shell). If the file is missing, the plugin
 has not adopted this pane yet: tell the user to run
-`herdr plugin action invoke est9.amq-adapter.reconcile` and stop.
+`herdr plugin action invoke est7.amq-adapter.reconcile` and stop.
 
 ## When a notice arrives
 
 The notice ends with the exact command to run. Run it:
 
 ```bash
-source ~/.config/herdr/plugins/config/est9.amq-adapter/panes/"${HERDR_PANE_ID//:/_}".env && amq drain
+source ~/.config/herdr/plugins/config/est7.amq-adapter/panes/"${HERDR_PANE_ID//:/_}".env && amq drain
 ```
 
 Read every message it prints, act on it, then reply in the same thread:

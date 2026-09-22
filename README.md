@@ -44,10 +44,10 @@ ln -s "$PWD/skills/herdr-amq-adapter" ~/.claude/skills/herdr-amq-adapter   # Cla
 
 Paths (fixed, per user):
 
-- shared root: `~/.local/state/herdr/plugins/est9.amq-adapter/amq-root`
-- identity per pane: `~/.config/herdr/plugins/config/est9.amq-adapter/panes/<pane>.env`
+- shared root: `~/.local/state/herdr/plugins/est7.amq-adapter/amq-root`
+- identity per pane: `~/.config/herdr/plugins/config/est7.amq-adapter/panes/<pane>.env`
   (`export AM_ROOT=… AM_ME=… HERDR_AMQ_PANE=…`)
-- waker logs: `~/.local/state/herdr/plugins/est9.amq-adapter/logs/<pane>.log`
+- waker logs: `~/.local/state/herdr/plugins/est7.amq-adapter/logs/<pane>.log`
 
 Naming is the identity contract: **the Herdr agent name is the AMQ handle**.
 Rename an agent in Herdr and its waker is re-spawned under the new handle on
@@ -76,13 +76,13 @@ replayed. The injector never passes `--wait`; its 4s timeout stays under
 With two agents open in Herdr (say `claude` and `codex`), in the `claude` pane:
 
 ```bash
-source ~/.config/herdr/plugins/config/est9.amq-adapter/panes/"${HERDR_PANE_ID//:/_}".env
+source ~/.config/herdr/plugins/config/est7.amq-adapter/panes/"${HERDR_PANE_ID//:/_}".env
 amq send --to codex --subject ping --body "reply with pong"
 ```
 
 `codex` receives the notice, drains, replies; `claude` is woken with the
-reply. Inspect with `herdr plugin action invoke est9.amq-adapter.status` and
-`herdr plugin log list --plugin est9.amq-adapter`.
+reply. Inspect with `herdr plugin action invoke est7.amq-adapter.status` and
+`herdr plugin log list --plugin est7.amq-adapter`.
 
 ## Layout
 
