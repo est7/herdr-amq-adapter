@@ -74,7 +74,11 @@ func Plan(live []AgentInfo, wakers []WakerRecord, current func(WakerRecord) bool
 			continue
 		}
 		name, named := Handle(a)
-		if (!named || name == w.Handle) && current(w) {
+		// A record without a generation (parked, or written before
+		// generations were recorded) cannot prove ownership and is not
+		// advertised to peers; ensure refreshes it even when the waker is
+		// current.
+		if (!named || name == w.Handle) && w.Generation != "" && current(w) {
 			covered[w.PaneID] = true
 		}
 	}

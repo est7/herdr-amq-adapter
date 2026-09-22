@@ -147,11 +147,11 @@ func TestPlan(t *testing.T) {
 		{PaneID: "w1:p5", Agent: str("codex")}, // unnamed, no record: start
 	}
 	wakers := []WakerRecord{
-		{PaneID: "w1:p1", Handle: "reviewer", PID: 100}, // current, matches: keep
-		{PaneID: "w1:p2", Handle: "codex", PID: 101},    // current, unnamed agent: keep (name unknown, no mismatch)
-		{PaneID: "w1:p3", Handle: "impl", PID: 102},     // waker not current: re-adopt (ensure keeps the record's handle)
-		{PaneID: "w1:p4", Handle: "qa-old", PID: 103},   // renamed: re-adopt
-		{PaneID: "w1:p9", Handle: "gone", PID: 104},     // pane vanished: retire
+		{PaneID: "w1:p1", Handle: "reviewer", PID: 100, Generation: "g"}, // current, matches: keep
+		{PaneID: "w1:p2", Handle: "codex", PID: 101, Generation: "g"},    // current, unnamed agent: keep (name unknown, no mismatch)
+		{PaneID: "w1:p3", Handle: "impl", PID: 102, Generation: "g"},     // waker not current: re-adopt (ensure keeps the record's handle)
+		{PaneID: "w1:p4", Handle: "qa-old", PID: 103, Generation: "g"},   // renamed: re-adopt
+		{PaneID: "w1:p9", Handle: "gone", PID: 104, Generation: "g"},     // pane vanished: retire
 	}
 	current := func(w WakerRecord) bool { return w.PID != 102 }
 	plan := Plan(live, wakers, current)
@@ -181,7 +181,7 @@ func TestPlanParkedAndStale(t *testing.T) {
 		{PaneID: "w1:p2", Agent: str("codex")},
 	}
 	wakers := []WakerRecord{
-		{PaneID: "w1:p1", Handle: "claude", PID: 100},
+		{PaneID: "w1:p1", Handle: "claude", PID: 100, Generation: "g"},
 		{PaneID: "w1:p2", Handle: "codex", PID: 0},
 	}
 	plan := Plan(live, wakers, func(w WakerRecord) bool { return false })
@@ -217,5 +217,16 @@ func TestAmqWakeArgsContract(t *testing.T) {
 		"--retry-until", "injected", "--interrupt-cmd", "none", "--no-self-upgrade"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v", got)
+	}
+}
+
+// A record with no generation is refreshed through ensure even when its
+// waker is current, so it becomes provable and advertisable.
+func TestPlanRefreshesRecordsWithoutGeneration(t *testing.T) {
+	live := []AgentInfo{{PaneID: "w1:p1", Name: str("claude-2"), Agent: str("claude")}}
+	wakers := []WakerRecord{{PaneID: "w1:p1", Handle: "claude-2", PID: 1}}
+	plan := Plan(live, wakers, func(WakerRecord) bool { return true })
+	if len(plan.Start) != 1 || len(plan.Stop) != 0 {
+		t.Fatalf("plan %+v", plan)
 	}
 }
