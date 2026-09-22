@@ -57,3 +57,35 @@ func TestForwardRecoveryAndConflict(t *testing.T) {
 		t.Fatalf("incomplete enqueue may be misrouted: %v", err)
 	}
 }
+
+// A sent copy with a leftover .dest sidecar and no transport receipt cannot
+// be resolved by retrying: it is reported as needing an operator, the
+// alias message stays in new, and nothing is enqueued.
+func TestOrphanSidecarWithoutReceiptNeedsOperator(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "root")
+	src, id := "mac-claude", "id-orphan"
+	msg := strings.Replace(sample, "2026-09-22T06-08-16.891Z_pid28972_b53cc11f", id, 1)
+	for _, d := range []string{"agents/heping-codex/inbox/new", "bridge/outbox/" + src + "/new", "bridge/outbox/" + src + "/sent"} {
+		if err := os.MkdirAll(filepath.Join(root, d), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	os.WriteFile(filepath.Join(root, "agents/heping-codex/inbox/new", id+".md"), []byte(msg), 0o600)
+	os.WriteFile(filepath.Join(root, "bridge/outbox", src, "sent", id+".md"), []byte("earlier bytes"), 0o600)
+	os.WriteFile(filepath.Join(root, "bridge/outbox", src, "new", id+".dest"), []byte("heping/pi\n"), 0o600)
+	fake := filepath.Join(dir, "fake-amq-bridge")
+	os.WriteFile(fake, []byte("#!/bin/sh\necho should-not-run >&2; exit 1\n"), 0o755)
+	env := Env{BridgeBin: fake, Root: root, StateDir: filepath.Join(dir, "state"), Local: Local{Host: "mac"},
+		Peers: []Peer{{Host: "heping", Agents: []string{"codex"}}}}
+	rep := Tick(context.Background(), env)
+	if len(rep.Stuck) != 1 || len(rep.Errors) != 0 || len(rep.Forwarded) != 0 {
+		t.Fatalf("report %+v errors %v", rep.Stuck, rep.Errors)
+	}
+	if !strings.Contains(rep.Stuck[0].Action, "heping/pi") || rep.Stuck[0].Key == "" {
+		t.Errorf("operator item lacks action/key: %+v", rep.Stuck[0])
+	}
+	if _, err := os.Stat(filepath.Join(root, "agents/heping-codex/inbox/new", id+".md")); err != nil {
+		t.Error("alias message must stay in new while stuck")
+	}
+}

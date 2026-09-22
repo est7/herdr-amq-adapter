@@ -30,6 +30,7 @@ type Report struct {
 	Applied     []CourierResult   // destination_maildir_committed receipts
 	Refused     []RefusedTransfer // envelopes the poll skipped (uncertain or conflict)
 	Diagnostics []json.RawMessage // upstream unresolved-ledger diagnostics, verbatim
+	Stuck       []*OperatorError  // items that need a person; the runner reports the set on change
 	Errors      []error
 }
 
@@ -122,6 +123,11 @@ func forwardAlias(ctx context.Context, env Env, peer Peer, agent string, rep *Re
 		path := filepath.Join(newDir, e.Name())
 		sender, id, err := forwardOne(ctx, env, alias, agent, dest, path)
 		if errors.Is(err, errSpoolBusy) {
+			continue
+		}
+		var op *OperatorError
+		if errors.As(err, &op) {
+			rep.Stuck = append(rep.Stuck, op)
 			continue
 		}
 		if err != nil {

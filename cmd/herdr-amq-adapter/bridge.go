@@ -117,6 +117,7 @@ type runnerStatus struct {
 	Pushed        int       `json:"pushed_total"`
 	Applied       int       `json:"applied_total"`
 	Refused       int       `json:"refused_total"`
+	Stuck         []string  `json:"stuck,omitempty"` // items needing a person, with the action
 }
 
 func statusPath(e env) string { return filepath.Join(e.stateDir, "bridge", "status.json") }
@@ -380,6 +381,20 @@ func bridgeRun() error {
 		}
 		for _, err := range rep.Errors {
 			noteErr("tick: %v", err)
+		}
+		stuck := make([]string, 0, len(rep.Stuck))
+		for _, op := range rep.Stuck {
+			stuck = append(stuck, op.Error())
+		}
+		sort.Strings(stuck)
+		if strings.Join(stuck, "\n") != strings.Join(rs.Stuck, "\n") {
+			for _, item := range stuck {
+				fmt.Printf("needs operator: %s\n", item)
+			}
+			if len(stuck) == 0 {
+				fmt.Println("needs operator: (cleared)")
+			}
+			rs.Stuck = stuck
 		}
 		rs.LastTick = time.Now()
 		rs.RendezvousURL, rs.ServingPort = benv.RendezvousURL, servingPort

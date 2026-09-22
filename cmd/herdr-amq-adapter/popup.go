@@ -101,6 +101,9 @@ func popupLines(v popupView) []string {
 			if r.LastError != "" {
 				lines = append(lines, "  最近错误 ("+ageOf(r.LastErrorAt)+"): "+r.LastError)
 			}
+			for _, item := range r.Stuck {
+				lines = append(lines, "  需人工处理: "+item)
+			}
 		}
 		lines = append(lines, "", "远端路由 · 最近成功同步（不代表 agent 在线）")
 		for _, p := range b.Peers {

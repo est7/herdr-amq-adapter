@@ -18,6 +18,18 @@ import (
 
 var errSpoolBusy = errors.New("another destination occupies this message's spool slot")
 
+// OperatorError marks a condition the runner cannot resolve by retrying:
+// the message stays where it is until a person acts. The runner reports
+// these as a set that is printed when it changes, not on every tick.
+type OperatorError struct {
+	Key    string // stable identity of the stuck item (path)
+	Action string // what to do
+	Err    error
+}
+
+func (e *OperatorError) Error() string { return e.Err.Error() + "; " + e.Action }
+func (e *OperatorError) Unwrap() error { return e.Err }
+
 // A forwarding marker contains the exact enqueued bytes, keyed by source,
 // message id and destination. It survives upstream removing the .dest sidecar.
 func forwardedPath(root, src, id, dest string) string {
@@ -81,7 +93,8 @@ func enqueueDestination(ctx context.Context, env Env, src, id, dest string, msg 
 				return err
 			}
 			if !accepted {
-				return fmt.Errorf("orphan destination sidecar has no transport receipt: %s", sidecar)
+				return &OperatorError{Key: sidecar, Err: fmt.Errorf("orphan destination sidecar has no transport receipt: %s", sidecar),
+					Action: "verify with the peer whether " + id + " reached " + strings.TrimSpace(string(binding)) + ", then remove the sidecar (delivered) or the sent copy (not delivered)"}
 			}
 			if err := os.Remove(sidecar); err != nil {
 				return err
@@ -180,11 +193,22 @@ func prepareSpool(root, src string) error {
 	return nil
 }
 
-// AMQ 0.80.1 Envelope v2 transfer identity. Old sent archives lack .dest;
-// only a matching destination-bound receipt proves that destination was sent.
-func transportAccepted(root, host, src, id, dest string, msg []byte) (bool, error) {
+// DeriveTransferID reproduces amq-bridge's transfer identity so a
+// destination-bound receipt can be looked up by name. It copies
+// internal/bridge.DeriveTransferID from agent-message-queue v0.80.1
+// (envelope v2 preimage "amq-xfer-v2\0host\0handle\0id\0dest", sha256,
+// lowercase unpadded base32). Upstream is the owner; TestTransferIDMatchesUpstream
+// drives the real binary and fails the moment this drifts.
+func DeriveTransferID(host, src, id, dest string) string {
 	sum := sha256.Sum256([]byte("amq-xfer-v2\x00" + host + "\x00" + src + "\x00" + id + "\x00" + dest))
-	transfer := strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(sum[:]))
+	return strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(sum[:]))
+}
+
+// transportAccepted reports whether a destination-bound transport receipt
+// exists for this exact message. Old sent archives lack .dest; only such a
+// receipt proves that destination was sent.
+func transportAccepted(root, host, src, id, dest string, msg []byte) (bool, error) {
+	transfer := DeriveTransferID(host, src, id, dest)
 	p := filepath.Join(root, "bridge", "receipts", transfer+"__transport_accepted.json")
 	b, err := os.ReadFile(p)
 	if errors.Is(err, os.ErrNotExist) {

@@ -80,6 +80,11 @@ func TestTwoHostsExchangeOverRealBridge(t *testing.T) {
 	if len(rep.Errors) != 0 || len(rep.Forwarded) != 1 || len(rep.Pushed) != 1 || rep.Pushed[0].Stage != "transport_accepted" {
 		t.Fatalf("mac tick: %+v", rep)
 	}
+	// Drift guard for the copied upstream derivation: the real courier's
+	// transfer id must equal ours for the same routing claims.
+	if want := DeriveTransferID("mac", "mac-claude", sentID, "heping/codex"); rep.Pushed[0].TransferID != want {
+		t.Fatalf("TestTransferIDMatchesUpstream: amq-bridge produced %s, DeriveTransferID gives %s; upstream changed its preimage", rep.Pushed[0].TransferID, want)
+	}
 	rep = Tick(ctx, heping.env)
 	if len(rep.Errors) != 0 || len(rep.Applied) != 1 || rep.Applied[0].Stage != "destination_maildir_committed" {
 		t.Fatalf("heping tick: %+v", rep)
