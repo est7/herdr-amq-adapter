@@ -146,16 +146,15 @@ func TestPlan(t *testing.T) {
 		{PaneID: "w1:p4", Name: str("qa"), Agent: str("claude")},
 		{PaneID: "w1:p5", Agent: str("codex")}, // unnamed, no record: start
 	}
-	const self = "/plugins/current/bin/adapter"
 	wakers := []WakerRecord{
-		{PaneID: "w1:p1", Handle: "reviewer", PID: 100, SelfBin: self}, // alive, matches: keep
-		{PaneID: "w1:p2", Handle: "codex", PID: 101, SelfBin: self},    // alive, unnamed agent: keep (name unknown, no mismatch)
-		{PaneID: "w1:p3", Handle: "impl", PID: 102, SelfBin: self},     // dead: re-adopt (ensure keeps the record's handle)
-		{PaneID: "w1:p4", Handle: "qa-old", PID: 103, SelfBin: self},   // renamed: re-adopt
-		{PaneID: "w1:p9", Handle: "gone", PID: 104, SelfBin: self},     // pane vanished: retire
+		{PaneID: "w1:p1", Handle: "reviewer", PID: 100}, // current, matches: keep
+		{PaneID: "w1:p2", Handle: "codex", PID: 101},    // current, unnamed agent: keep (name unknown, no mismatch)
+		{PaneID: "w1:p3", Handle: "impl", PID: 102},     // waker not current: re-adopt (ensure keeps the record's handle)
+		{PaneID: "w1:p4", Handle: "qa-old", PID: 103},   // renamed: re-adopt
+		{PaneID: "w1:p9", Handle: "gone", PID: 104},     // pane vanished: retire
 	}
-	alive := func(w WakerRecord) bool { return w.PID != 102 }
-	plan := Plan(live, wakers, alive, self)
+	current := func(w WakerRecord) bool { return w.PID != 102 }
+	plan := Plan(live, wakers, current)
 
 	var stopped []string
 	for _, w := range plan.Stop {
@@ -173,19 +172,19 @@ func TestPlan(t *testing.T) {
 	}
 }
 
-// A plugin update installs the adapter under a new path; wakers still
-// pointing their --inject-via at the old binary must be re-adopted, and a
-// parked record (pid 0) is re-adopted rather than retired.
-func TestPlanStaleBinaryAndParked(t *testing.T) {
+// A parked record (pid 0, no generation) for a live pane is re-adopted
+// rather than retired, and a live record that is not current (for example
+// after a plugin update moved the --inject-via binary) is re-adopted too.
+func TestPlanParkedAndStale(t *testing.T) {
 	live := []AgentInfo{
 		{PaneID: "w1:p1", Name: str("claude"), Agent: str("claude")},
 		{PaneID: "w1:p2", Agent: str("codex")},
 	}
 	wakers := []WakerRecord{
-		{PaneID: "w1:p1", Handle: "claude", PID: 100, SelfBin: "/plugins/old/bin/adapter"},
-		{PaneID: "w1:p2", Handle: "codex", PID: 0, SelfBin: "/plugins/new/bin/adapter"},
+		{PaneID: "w1:p1", Handle: "claude", PID: 100},
+		{PaneID: "w1:p2", Handle: "codex", PID: 0},
 	}
-	plan := Plan(live, wakers, func(w WakerRecord) bool { return w.PID != 0 }, "/plugins/new/bin/adapter")
+	plan := Plan(live, wakers, func(w WakerRecord) bool { return false })
 	if len(plan.Stop) != 0 {
 		t.Errorf("stop: got %v want none", plan.Stop)
 	}
@@ -195,6 +194,19 @@ func TestPlanStaleBinaryAndParked(t *testing.T) {
 	}
 	if want := []string{"w1:p1", "w1:p2"}; !reflect.DeepEqual(started, want) {
 		t.Errorf("start: got %v want %v", started, want)
+	}
+}
+
+// After `herdr pane move` the record is keyed by the new pane while the
+// waker's argv still names the old one; ArgvPane is what identity checks
+// must use.
+func TestArgvPaneSurvivesMove(t *testing.T) {
+	w := WakerRecord{PaneID: "wB:p2", SpawnPaneID: "w8:p7", PaneAliases: []string{"w8:p7"}}
+	if w.ArgvPane() != "w8:p7" {
+		t.Errorf("argv pane %q", w.ArgvPane())
+	}
+	if (WakerRecord{PaneID: "w1:p1"}).ArgvPane() != "w1:p1" {
+		t.Error("legacy record without spawn_pane_id must fall back to pane_id")
 	}
 }
 

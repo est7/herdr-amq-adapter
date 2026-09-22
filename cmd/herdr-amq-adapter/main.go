@@ -158,14 +158,14 @@ func move(e env, oldPane, newPane string) error {
 }
 
 // ensure adopts the agent in paneID: name it if needed, register the handle
-// in the shared root, write the pane identity file, and start its waker.
-// It is idempotent, so both the hook and reconcile can call it. An existing
+// in the shared root, write the pane identity file, and make sure amq runs
+// a waker with exactly the injector target this pane wants. It is
+// idempotent, so both the hook and reconcile can call it. An existing
 // record is consulted first: its handle is reused for an unnamed agent
-// (Herdr drops the live name when an agent is released), and its waker is
-// replaced only when the handle, root, --inject-via binary, or liveness
-// no longer match.
+// (Herdr drops the live name when an agent is released), and its argv pane
+// id is kept so a moved pane still proves its own waker.
 func ensure(e env, paneID string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	info, ok, err := e.herdr.AgentGet(ctx, paneID)
 	if err != nil {
@@ -195,15 +195,9 @@ func ensure(e env, paneID string) error {
 		}
 		fmt.Printf("named pane %s agent %q\n", paneID, handle)
 	}
+	argvPane := paneID
 	if exists {
-		current := rec.Handle == handle && rec.Root == e.root && rec.SelfBin == e.self && adapter.WakerAlive(rec)
-		if current {
-			fmt.Printf("pane %s already has waker pid=%d handle=%s\n", paneID, rec.PID, handle)
-			return nil
-		}
-		if err := adapter.TerminateWaker(rec); err != nil {
-			return fmt.Errorf("terminate pid %d: %w", rec.PID, err)
-		}
+		argvPane = rec.ArgvPane()
 	}
 	if err := adapter.EnsureMailbox(ctx, e.amq, e.root, handle); err != nil {
 		return err
@@ -215,29 +209,67 @@ func ensure(e env, paneID string) error {
 			return err
 		}
 	}
-	fresh, err := adapter.Spawn(adapter.WakerSpec{
-		AmqBin: e.amq, SelfBin: e.self, LogDir: e.logs, Agent: info, Handle: handle, Root: e.root,
-	})
+	want := adapter.ExpectedTarget(e.self, handle, argvPane, e.root)
+	st, err := adapter.WakeCheck(ctx, e.amq, e.root, handle)
 	if err != nil {
 		return err
 	}
-	fresh.PaneAliases = rec.PaneAliases
+	decision := adapter.DecideWake(st, want)
+	switch decision {
+	case adapter.DecisionKeep:
+	case adapter.DecisionRepair:
+		if err := adapter.WakeRepair(ctx, e.amq, e.root, handle); err != nil {
+			return err
+		}
+	case adapter.DecisionReplace, adapter.DecisionStart:
+		if err := adapter.WakeRetire(ctx, e.amq, e.root, handle, st); err != nil {
+			return err
+		}
+		if _, err := adapter.Spawn(adapter.WakerSpec{
+			AmqBin: e.amq, SelfBin: e.self, LogDir: e.logs, Agent: info, Handle: handle, ArgvPane: argvPane, Root: e.root,
+		}); err != nil {
+			return err
+		}
+	}
+	if decision != adapter.DecisionKeep {
+		liveCtx, liveCancel := context.WithTimeout(ctx, 8*time.Second)
+		defer liveCancel()
+		if st, err = adapter.AwaitLive(liveCtx, e.amq, e.root, handle, want); err != nil {
+			return err
+		}
+	}
+	fresh := adapter.WakerRecord{
+		PaneID: paneID, Handle: handle, SpawnPaneID: argvPane, Generation: st.Generation, PID: st.PID,
+		Cwd: info.Cwd, Root: e.root, StartedUnix: rec.StartedUnix, PaneAliases: rec.PaneAliases,
+	}
+	if decision != adapter.DecisionKeep || fresh.StartedUnix == 0 {
+		fresh.StartedUnix = time.Now().Unix()
+	}
 	if err := e.store.Put(fresh); err != nil {
-		_ = adapter.Terminate(fresh.PID)
 		return err
 	}
-	fmt.Printf("adopted pane=%s handle=%s waker pid=%d identity=%s\n",
-		paneID, handle, fresh.PID, adapter.IdentityPath(e.configDir, paneID))
+	fmt.Printf("%s pane=%s handle=%s waker pid=%d gen=%s identity=%s\n",
+		decision, paneID, handle, st.PID, st.Generation, adapter.IdentityPath(e.configDir, paneID))
 	return nil
 }
 
+// retireWaker stops whatever waker amq currently holds for the handle,
+// by its exact saved identity and generation.
+func retireWaker(ctx context.Context, e env, handle string) error {
+	st, err := adapter.WakeCheck(ctx, e.amq, e.root, handle)
+	if err != nil {
+		return err
+	}
+	return adapter.WakeRetire(ctx, e.amq, e.root, handle, st)
+}
+
 // park handles an agent released from a pane that stays open: the waker is
-// stopped, but the record (pid 0) and identity file are kept so the next
+// retired, but the record (pid 0) and identity file are kept so the next
 // agent detected in this pane is offered the same handle by ensure. A
 // release event can arrive after the next agent was already detected in
 // the same pane; the live occupant decides, not the event order.
 func park(e env, paneID string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	if _, occupied, err := e.herdr.AgentGet(ctx, paneID); err != nil {
 		return err
@@ -253,36 +285,36 @@ func park(e env, paneID string) error {
 		fmt.Printf("pane %s has no waker record\n", paneID)
 		return nil
 	}
-	if err := adapter.TerminateWaker(rec); err != nil {
-		return fmt.Errorf("terminate pid %d: %w", rec.PID, err)
+	if err := retireWaker(ctx, e, rec.Handle); err != nil {
+		return err
 	}
 	fmt.Printf("parked pane=%s handle=%s waker pid=%d\n", paneID, rec.Handle, rec.PID)
 	rec.PID = 0
+	rec.Generation = ""
 	return e.store.Put(rec)
 }
 
 func stop(e env, paneID string) error {
-	if err := adapter.RemoveIdentity(e.configDir, paneID); err != nil {
-		return err
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
 	rec, ok, err := e.store.Get(paneID)
 	if err != nil {
 		return err
 	}
 	if !ok {
 		fmt.Printf("pane %s has no waker record\n", paneID)
-		return nil
+		return adapter.RemoveIdentity(e.configDir, paneID)
 	}
-	for _, alias := range rec.PaneAliases {
-		if err := adapter.RemoveIdentity(e.configDir, alias); err != nil {
-			return err
-		}
-	}
-	if err := adapter.TerminateWaker(rec); err != nil {
-		return fmt.Errorf("terminate pid %d: %w", rec.PID, err)
+	if err := retireWaker(ctx, e, rec.Handle); err != nil {
+		return err
 	}
 	if err := e.store.Delete(paneID); err != nil {
 		return err
+	}
+	for _, pane := range append([]string{paneID}, rec.PaneAliases...) {
+		if err := adapter.RemoveIdentity(e.configDir, pane); err != nil {
+			return err
+		}
 	}
 	fmt.Printf("retired pane=%s handle=%s waker pid=%d\n", paneID, rec.Handle, rec.PID)
 	return nil
@@ -298,7 +330,7 @@ func runReconcile() error {
 		return err
 	}
 	defer unlock()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	live, err := e.herdr.AgentList(ctx)
 	if err != nil {
@@ -308,7 +340,14 @@ func runReconcile() error {
 	if err != nil {
 		return err
 	}
-	plan := adapter.Plan(live, wakers, adapter.WakerAlive, e.self)
+	current := func(w adapter.WakerRecord) bool {
+		st, err := adapter.WakeCheck(ctx, e.amq, e.root, w.Handle)
+		if err != nil {
+			return false
+		}
+		return adapter.DecideWake(st, adapter.ExpectedTarget(e.self, w.Handle, w.ArgvPane(), e.root)) == adapter.DecisionKeep
+	}
+	plan := adapter.Plan(live, wakers, current)
 	for _, w := range plan.Stop {
 		if err := stop(e, w.PaneID); err != nil {
 			return err
@@ -332,11 +371,19 @@ func runStatus() error {
 	if err != nil {
 		return err
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 	fmt.Printf("root: %s\n", e.root)
 	tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "PANE\tHANDLE\tPID\tALIVE\tCWD")
+	fmt.Fprintln(tw, "PANE\tHANDLE\tWAKE\tPID\tCURRENT\tCWD")
 	for _, w := range wakers {
-		fmt.Fprintf(tw, "%s\t%s\t%d\t%v\t%s\n", w.PaneID, w.Handle, w.PID, adapter.WakerAlive(w), w.Cwd)
+		st, err := adapter.WakeCheck(ctx, e.amq, e.root, w.Handle)
+		wake, current := "error", false
+		if err == nil {
+			wake = st.Status
+			current = adapter.DecideWake(st, adapter.ExpectedTarget(e.self, w.Handle, w.ArgvPane(), e.root)) == adapter.DecisionKeep
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%v\t%s\n", w.PaneID, w.Handle, wake, st.PID, current, w.Cwd)
 	}
 	return tw.Flush()
 }

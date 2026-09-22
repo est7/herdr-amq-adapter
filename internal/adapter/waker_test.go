@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,97 +10,143 @@ import (
 	"time"
 )
 
-// Spawn must produce a detached, terminable process whose stdio is not the
-// test's own pipes; a fake amq that ignores its argv (but keeps it on its
-// command line, as the real one does) stands in for the real one.
-func TestSpawnDetachedAndTerminate(t *testing.T) {
+// Spawn must produce a detached process whose stdio is not the test's own
+// pipes; a fake amq stands in for the real one.
+func TestSpawnDetached(t *testing.T) {
 	dir := t.TempDir()
 	fake := filepath.Join(dir, "fake-amq")
 	if err := os.WriteFile(fake, []byte("#!/bin/sh\nsleep 30\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	rec, err := Spawn(WakerSpec{
+	pid, err := Spawn(WakerSpec{
 		AmqBin: fake, SelfBin: "/nonexistent/self", LogDir: filepath.Join(dir, "logs"),
-		Agent: AgentInfo{PaneID: "w1:p1", Cwd: dir}, Handle: "reviewer", Root: "/state/amq-root",
+		Agent: AgentInfo{PaneID: "w1:p1", Cwd: dir}, Handle: "reviewer", ArgvPane: "w1:p1", Root: "/state/amq-root",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rec.SelfBin != "/nonexistent/self" {
-		t.Errorf("record self_bin %q", rec.SelfBin)
-	}
-	if !Alive(rec.PID) {
-		t.Fatalf("pid %d not alive after spawn", rec.PID)
-	}
-	if !WakerAlive(rec) {
-		t.Fatalf("pid %d serving %q not recognised as the recorded waker", rec.PID, rec.Handle)
-	}
-	// Same pid, but the record disagrees on any part of the waker's argv:
-	// a reused pid after reboot, or a stale waker for another pane/root/binary.
-	for name, mutate := range map[string]func(*WakerRecord){
-		"handle":  func(w *WakerRecord) { w.Handle = "someone-else" },
-		"pane":    func(w *WakerRecord) { w.PaneID = "w9:p9" },
-		"root":    func(w *WakerRecord) { w.Root = "/elsewhere" },
-		"selfbin": func(w *WakerRecord) { w.SelfBin = "/plugins/old/adapter" },
-	} {
-		other := rec
-		mutate(&other)
-		if WakerAlive(other) {
-			t.Errorf("pid %d accepted for a record with a different %s", rec.PID, name)
-		}
-	}
-	if WakerAlive(WakerRecord{PID: 0, Handle: "reviewer"}) {
-		t.Fatal("parked record (pid 0) must not be alive")
-	}
-	// A record from before self_bin existed still identifies its waker, so
-	// reconcile can replace it instead of leaving a second waker behind.
-	legacy := rec
-	legacy.SelfBin = ""
-	if !WakerAlive(legacy) {
-		t.Fatal("legacy record without self_bin must still identify its own waker")
+	t.Cleanup(func() { _ = syscall.Kill(-pid, syscall.SIGKILL) })
+	if err := syscall.Kill(pid, 0); err != nil {
+		t.Fatalf("pid %d not alive after spawn: %v", pid, err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "logs", "w1_p1.log")); err != nil {
 		t.Errorf("log file missing: %v", err)
 	}
-	if err := TerminateWaker(rec); err != nil {
-		t.Fatal(err)
-	}
-	// The test process is the spawner, so the exited child lingers as a
-	// zombie until reaped (in production the hook exits and init reaps).
-	// Reap it here so Alive reflects the real outcome.
-	var status syscall.WaitStatus
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		wpid, err := syscall.Wait4(rec.PID, &status, syscall.WNOHANG, nil)
-		if err != nil || wpid == rec.PID {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	if Alive(rec.PID) {
-		t.Fatalf("pid %d still alive after SIGTERM to its process group", rec.PID)
-	}
-	if !status.Signaled() || status.Signal() != syscall.SIGTERM {
-		t.Errorf("expected death by SIGTERM, got %v", status)
+	// Detached: the child is its own session/process-group leader.
+	if pgid, err := syscall.Getpgid(pid); err != nil || pgid != pid {
+		t.Errorf("pgid=%d err=%v; want own process group", pgid, err)
 	}
 }
 
-// A recorded pid that is not positively the recorded waker must never be
-// signalled: after a reboot it can belong to an unrelated process group.
-func TestTerminateWakerRefusesUnidentifiedPid(t *testing.T) {
-	cmd := exec.Command("sleep", "30")
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	if err := cmd.Start(); err != nil {
+// Real amq lifecycle: spawn, prove live with the wanted target, refuse a
+// foreign target, retire by generation, then stale + repair.
+func TestWakeLifecycleWithRealAmq(t *testing.T) {
+	amq, err := exec.LookPath("amq")
+	if err != nil {
+		t.Skip("amq not on PATH")
+	}
+	// amq refuses injectors under group/world-writable parents (e.g. /tmp);
+	// t.TempDir lives under the user's private cache on macOS/Linux.
+	dir := t.TempDir()
+	root := filepath.Join(dir, "root")
+	if out, err := exec.Command(amq, "--no-update-check", "init", "--root", root, "--agents", "bob").CombinedOutput(); err != nil {
+		t.Fatalf("amq init: %v: %s", err, out)
+	}
+	inj := filepath.Join(dir, "inj.sh")
+	if err := os.WriteFile(inj, []byte("#!/bin/sh\necho AMQ_INJECT_PROGRESS=accepted >&2\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = cmd.Process.Kill(); _, _ = cmd.Process.Wait() })
-	rec := WakerRecord{PID: cmd.Process.Pid, Handle: "reviewer", PaneID: "w1:p1", Root: "/r", SelfBin: "/s"}
-	if err := TerminateWaker(rec); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel()
+	want := ExpectedTarget(inj, "bob", "w1:p1", root)
+
+	st, err := WakeCheck(ctx, amq, root, "bob")
+	if err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(50 * time.Millisecond)
-	if !Alive(rec.PID) {
-		t.Fatalf("unrelated pid %d was signalled", rec.PID)
+	if d := DecideWake(st, want); d != DecisionStart {
+		t.Fatalf("fresh root: decision %s, want start (%+v)", d, st)
+	}
+	pid, err := Spawn(WakerSpec{AmqBin: amq, SelfBin: inj, LogDir: filepath.Join(dir, "logs"),
+		Agent: AgentInfo{PaneID: "w1:p1", Cwd: dir}, Handle: "bob", ArgvPane: "w1:p1", Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = syscall.Kill(-pid, syscall.SIGKILL) })
+	liveCtx, liveCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer liveCancel()
+	st, err = AwaitLive(liveCtx, amq, root, "bob", want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.PID != pid || st.Generation == "" {
+		t.Fatalf("live state %+v, want pid %d with a generation", st, pid)
+	}
+	// A different wanted target (other pane, other binary) is not this waker.
+	if d := DecideWake(st, ExpectedTarget(inj, "bob", "w9:p9", root)); d != DecisionReplace {
+		t.Errorf("foreign pane: decision %s, want replace", d)
+	}
+	if d := DecideWake(st, ExpectedTarget("/other/adapter", "bob", "w1:p1", root)); d != DecisionReplace {
+		t.Errorf("foreign binary: decision %s, want replace", d)
+	}
+	// Retire with a stale generation must be refused by amq.
+	stale := st
+	stale.Generation = "00000000000000000000000000000000"
+	if err := WakeRetire(ctx, amq, root, "bob", stale); err == nil {
+		t.Fatal("retire with a wrong generation must be refused")
+	}
+	if err := WakeRetire(ctx, amq, root, "bob", st); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if st, _ = WakeCheck(ctx, amq, root, "bob"); st.Status == "missing" {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if st.Status != "missing" {
+		t.Fatalf("after retire: status %q", st.Status)
+	}
+	if err := WakeRetire(ctx, amq, root, "bob", st); err != nil {
+		t.Fatalf("retire with nothing to retire must be a no-op: %v", err)
+	}
+
+	// Stale lock (waker killed hard) is repaired from its saved target.
+	pid2, err := Spawn(WakerSpec{AmqBin: amq, SelfBin: inj, LogDir: filepath.Join(dir, "logs"),
+		Agent: AgentInfo{PaneID: "w1:p1", Cwd: dir}, Handle: "bob", ArgvPane: "w1:p1", Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = syscall.Kill(-pid2, syscall.SIGKILL) })
+	liveCtx2, liveCancel2 := context.WithTimeout(ctx, 10*time.Second)
+	defer liveCancel2()
+	if _, err := AwaitLive(liveCtx2, amq, root, "bob", want); err != nil {
+		t.Fatal(err)
+	}
+	_ = syscall.Kill(pid2, syscall.SIGKILL)
+	deadline = time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if st, _ = WakeCheck(ctx, amq, root, "bob"); st.Status == "stale" {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if d := DecideWake(st, want); d != DecisionRepair {
+		t.Fatalf("after SIGKILL: status %q decision %s, want repair", st.Status, d)
+	}
+	if err := WakeRepair(ctx, amq, root, "bob"); err != nil {
+		t.Fatal(err)
+	}
+	liveCtx3, liveCancel3 := context.WithTimeout(ctx, 10*time.Second)
+	defer liveCancel3()
+	st, err = AwaitLive(liveCtx3, amq, root, "bob", want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = syscall.Kill(-st.PID, syscall.SIGKILL) })
+	if err := WakeRetire(ctx, amq, root, "bob", st); err != nil {
+		t.Fatal(err)
 	}
 }
 

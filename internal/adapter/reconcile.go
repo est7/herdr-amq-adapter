@@ -19,21 +19,33 @@ func Handle(a AgentInfo) (string, bool) {
 	return *a.Name, true
 }
 
-// WakerRecord is the durable record of one spawned `amq wake` process.
+// WakerRecord is the adapter's durable note about one pane's waker. Waker
+// identity and liveness are amq's (see wake.go); the record carries what
+// amq cannot know: which pane the waker serves and the pane id baked into
+// its injector argv.
 type WakerRecord struct {
 	PaneID string `json:"pane_id"`
 	Handle string `json:"handle"`
-	PID    int    `json:"pid"` // 0 while parked (agent released, pane still open)
-	Cwd    string `json:"cwd"`
-	Root   string `json:"root"`
-	// SelfBin is the adapter binary the waker was given as --inject-via. A
-	// plugin update installs a new binary under a new path; a waker still
-	// pointing at the old one must be restarted.
-	SelfBin     string `json:"self_bin"`
+	// SpawnPaneID is the pane id in the waker's --inject-arg list. It stays
+	// what it was at spawn time even after `herdr pane move` re-keys PaneID,
+	// because amq identifies the waker by that exact argv.
+	SpawnPaneID string `json:"spawn_pane_id"`
+	Generation  string `json:"generation,omitempty"` // amq wake lock generation; empty while parked
+	PID         int    `json:"pid"`                  // informational; 0 while parked
+	Cwd         string `json:"cwd"`
+	Root        string `json:"root"`
 	StartedUnix int64  `json:"started_unix"`
 	// PaneAliases are earlier pane ids of the same occupant (after moves);
 	// their identity files are kept alive until the agent goes away.
 	PaneAliases []string `json:"pane_aliases,omitempty"`
+}
+
+// ArgvPane is the pane id the waker's injector argv names.
+func (w WakerRecord) ArgvPane() string {
+	if w.SpawnPaneID != "" {
+		return w.SpawnPaneID
+	}
+	return w.PaneID
 }
 
 // ReconcilePlan lists the panes to (re)adopt and the records to retire.
@@ -43,12 +55,12 @@ type ReconcilePlan struct {
 }
 
 // Plan diffs live agents against recorded wakers. Every live agent is
-// wanted; a pane whose record is healthy (waker alive, handle matches the
-// live name, --inject-via is the current binary) is left alone, any other
+// wanted; a pane whose record is current (handle matches the live name and
+// amq reports a live waker with the wanted target) is left alone, any other
 // live pane goes to Start, where ensure decides what to replace and keeps
 // the pane's previous handle. Only a record whose pane no longer hosts an
 // agent is retired outright.
-func Plan(live []AgentInfo, wakers []WakerRecord, alive func(WakerRecord) bool, selfBin string) ReconcilePlan {
+func Plan(live []AgentInfo, wakers []WakerRecord, current func(WakerRecord) bool) ReconcilePlan {
 	want := map[string]AgentInfo{}
 	for _, a := range live {
 		want[a.PaneID] = a
@@ -62,7 +74,7 @@ func Plan(live []AgentInfo, wakers []WakerRecord, alive func(WakerRecord) bool, 
 			continue
 		}
 		name, named := Handle(a)
-		if (!named || name == w.Handle) && w.SelfBin == selfBin && alive(w) {
+		if (!named || name == w.Handle) && current(w) {
 			covered[w.PaneID] = true
 		}
 	}

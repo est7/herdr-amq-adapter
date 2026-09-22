@@ -40,9 +40,9 @@ ln -s "$PWD/skills/herdr-amq-adapter" ~/.claude/skills/herdr-amq-adapter   # Cla
 | Herdr detects an agent in a pane | if unnamed, `herdr agent rename` it `<kind>` or `<kind>-N` (claude, codex-2 …); provision its mailbox in the shared root (`amq init --force` with the merged agent list); write the pane's identity file; spawn a detached `amq wake` for it |
 | mail arrives for that handle | `amq wake` calls `inject`; it reads the agent's live status, and if `idle`/`done`/`unknown` submits the notice with `herdr agent prompt` |
 | `herdr pane move` gives the pane a new id | re-key the record, write an identity file for the new id, keep the old one (the moved process still sees its original `HERDR_PANE_ID`); the waker is untouched because delivery targets the agent **name**, which Herdr carries across moves |
-| agent released, pane stays open | SIGTERM the waker; keep the record (pid 0) and identity file so the next agent detected in this pane is offered the same handle (Herdr drops the live name on release) |
-| pane closed or exited | SIGTERM the waker, remove identity files (current id and aliases) and the record |
-| Herdr session restore, or action `reconcile` | diff live agents vs records: retire records whose pane hosts no agent; re-adopt panes whose waker is dead, renamed, or still pointing `--inject-via` at a previous plugin build |
+| agent released, pane stays open | retire the waker; keep the record (pid 0) and identity file so the next agent detected in this pane is offered the same handle (Herdr drops the live name on release) |
+| pane closed or exited | retire the waker, remove identity files (current id and aliases) and the record |
+| Herdr session restore, or action `reconcile` | diff live agents vs records: retire records whose pane hosts no agent; re-adopt panes whose waker is stale, renamed, or still pointing `--inject-via` at a previous plugin build |
 
 Paths (fixed, per user):
 
@@ -58,10 +58,16 @@ reviewer …`) and that name is used verbatim. An agent that restarts in the
 same pane gets its previous handle back unless another live agent has taken
 it, so two `claude` panes cannot swap names across restarts.
 
-Waker liveness is checked against the full `amq wake` command line the
-record implies, not just the pid, so a pid reused after a reboot is not
-mistaken for a running waker and is never signalled. Lifecycle transitions
-(hooks, reconcile) are serialised by a lock in the state dir.
+Waker identity and liveness belong to amq, not to this plugin: `amq wake
+check` says whether the lock holder is live, stale, or missing and names its
+generation and saved injector target; the plugin compares that target with
+the one it wants for the pane (binary, pane id, handle, root) and then either
+keeps it, has amq `repair` a stale one from its saved target, or `retire`s it
+by exact identity and generation before starting a replacement. A start is
+only recorded once `check` reports it live, so a start that lost the lock
+race is never recorded. The plugin never reads pids from `ps` and never
+signals processes. Lifecycle transitions (hooks, reconcile) are serialised
+by a lock in the state dir.
 
 ## Injector protocol
 
