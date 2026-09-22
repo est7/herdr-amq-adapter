@@ -14,7 +14,7 @@ func TestDecide(t *testing.T) {
 		want ActionKind
 	}{
 		{"detected", `{"event":"pane.agent_detected","data":{"pane_id":"w1:p2","workspace_id":"w1","agent":"claude"}}`, ActionEnsure},
-		{"released", `{"event":"pane.agent_detected","data":{"pane_id":"w1:p2","workspace_id":"w1","released":true,"final_status":"done"}}`, ActionStop},
+		{"released", `{"event":"pane.agent_detected","data":{"pane_id":"w1:p2","workspace_id":"w1","released":true,"final_status":"done"}}`, ActionPark},
 		{"closed", `{"event":"pane.closed","data":{"pane_id":"w1:p2","workspace_id":"w1"}}`, ActionStop},
 		{"exited", `{"event":"pane.exited","data":{"pane_id":"w1:p2","workspace_id":"w1"}}`, ActionStop},
 		// wire form as herdr 0.9.1 actually emits it (snake_case EventKind)
@@ -80,18 +80,22 @@ func TestGateOnStatus(t *testing.T) {
 func TestChooseHandle(t *testing.T) {
 	taken := map[string]bool{"claude": true, "claude-2": true}
 	cases := []struct {
-		a    AgentInfo
-		want string
+		a         AgentInfo
+		preferred string
+		want      string
 	}{
-		{AgentInfo{Name: str("reviewer"), Agent: str("claude")}, "reviewer"}, // live name wins
-		{AgentInfo{Agent: str("codex")}, "codex"},
-		{AgentInfo{Agent: str("claude")}, "claude-3"},
-		{AgentInfo{Agent: str("Antigravity CLI")}, "antigravity-cli"},
-		{AgentInfo{}, "agent"},
+		{AgentInfo{Name: str("reviewer"), Agent: str("claude")}, "", "reviewer"},    // live name wins
+		{AgentInfo{Name: str("reviewer"), Agent: str("claude")}, "old", "reviewer"}, // even over a preference
+		{AgentInfo{Agent: str("codex")}, "", "codex"},
+		{AgentInfo{Agent: str("claude")}, "", "claude-3"},
+		{AgentInfo{Agent: str("Antigravity CLI")}, "", "antigravity-cli"},
+		{AgentInfo{}, "", "agent"},
+		{AgentInfo{Agent: str("claude")}, "claude-7", "claude-7"}, // restarted agent keeps its old handle
+		{AgentInfo{Agent: str("claude")}, "claude-2", "claude-3"}, // unless another live agent took it
 	}
 	for _, c := range cases {
-		if got := ChooseHandle(c.a, taken); got != c.want {
-			t.Errorf("%+v: got %q want %q", c.a, got, c.want)
+		if got := ChooseHandle(c.a, taken, c.preferred); got != c.want {
+			t.Errorf("%+v preferred=%q: got %q want %q", c.a, c.preferred, got, c.want)
 		}
 	}
 }
@@ -142,15 +146,16 @@ func TestPlan(t *testing.T) {
 		{PaneID: "w1:p4", Name: str("qa"), Agent: str("claude")},
 		{PaneID: "w1:p5", Agent: str("codex")}, // unnamed, no record: start
 	}
+	const self = "/plugins/current/bin/adapter"
 	wakers := []WakerRecord{
-		{PaneID: "w1:p1", Handle: "reviewer", PID: 100}, // alive, matches: keep
-		{PaneID: "w1:p2", Handle: "codex", PID: 101},    // alive, unnamed agent: keep (name unknown, no mismatch)
-		{PaneID: "w1:p3", Handle: "impl", PID: 102},     // dead: forget + restart
-		{PaneID: "w1:p4", Handle: "qa-old", PID: 103},   // renamed: stop + restart
-		{PaneID: "w1:p9", Handle: "gone", PID: 104},     // pane vanished: stop
+		{PaneID: "w1:p1", Handle: "reviewer", PID: 100, SelfBin: self}, // alive, matches: keep
+		{PaneID: "w1:p2", Handle: "codex", PID: 101, SelfBin: self},    // alive, unnamed agent: keep (name unknown, no mismatch)
+		{PaneID: "w1:p3", Handle: "impl", PID: 102, SelfBin: self},     // dead: re-adopt (ensure keeps the record's handle)
+		{PaneID: "w1:p4", Handle: "qa-old", PID: 103, SelfBin: self},   // renamed: re-adopt
+		{PaneID: "w1:p9", Handle: "gone", PID: 104, SelfBin: self},     // pane vanished: retire
 	}
-	alive := func(pid int) bool { return pid != 102 }
-	plan := Plan(live, wakers, alive)
+	alive := func(w WakerRecord) bool { return w.PID != 102 }
+	plan := Plan(live, wakers, alive, self)
 
 	var stopped []string
 	for _, w := range plan.Stop {
@@ -160,10 +165,35 @@ func TestPlan(t *testing.T) {
 	for _, a := range plan.Start {
 		started = append(started, a.PaneID)
 	}
-	if want := []string{"w1:p3", "w1:p4", "w1:p9"}; !reflect.DeepEqual(stopped, want) {
+	if want := []string{"w1:p9"}; !reflect.DeepEqual(stopped, want) {
 		t.Errorf("stop: got %v want %v", stopped, want)
 	}
 	if want := []string{"w1:p3", "w1:p4", "w1:p5"}; !reflect.DeepEqual(started, want) {
+		t.Errorf("start: got %v want %v", started, want)
+	}
+}
+
+// A plugin update installs the adapter under a new path; wakers still
+// pointing their --inject-via at the old binary must be re-adopted, and a
+// parked record (pid 0) is re-adopted rather than retired.
+func TestPlanStaleBinaryAndParked(t *testing.T) {
+	live := []AgentInfo{
+		{PaneID: "w1:p1", Name: str("claude"), Agent: str("claude")},
+		{PaneID: "w1:p2", Agent: str("codex")},
+	}
+	wakers := []WakerRecord{
+		{PaneID: "w1:p1", Handle: "claude", PID: 100, SelfBin: "/plugins/old/bin/adapter"},
+		{PaneID: "w1:p2", Handle: "codex", PID: 0, SelfBin: "/plugins/new/bin/adapter"},
+	}
+	plan := Plan(live, wakers, func(w WakerRecord) bool { return w.PID != 0 }, "/plugins/new/bin/adapter")
+	if len(plan.Stop) != 0 {
+		t.Errorf("stop: got %v want none", plan.Stop)
+	}
+	var started []string
+	for _, a := range plan.Start {
+		started = append(started, a.PaneID)
+	}
+	if want := []string{"w1:p1", "w1:p2"}; !reflect.DeepEqual(started, want) {
 		t.Errorf("start: got %v want %v", started, want)
 	}
 }

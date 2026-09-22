@@ -21,29 +21,34 @@ func Handle(a AgentInfo) (string, bool) {
 
 // WakerRecord is the durable record of one spawned `amq wake` process.
 type WakerRecord struct {
-	PaneID      string `json:"pane_id"`
-	Handle      string `json:"handle"`
-	PID         int    `json:"pid"`
-	Cwd         string `json:"cwd"`
-	Root        string `json:"root"`
+	PaneID string `json:"pane_id"`
+	Handle string `json:"handle"`
+	PID    int    `json:"pid"` // 0 while parked (agent released, pane still open)
+	Cwd    string `json:"cwd"`
+	Root   string `json:"root"`
+	// SelfBin is the adapter binary the waker was given as --inject-via. A
+	// plugin update installs a new binary under a new path; a waker still
+	// pointing at the old one must be restarted.
+	SelfBin     string `json:"self_bin"`
 	StartedUnix int64  `json:"started_unix"`
 	// PaneAliases are earlier pane ids of the same occupant (after moves);
 	// their identity files are kept alive until the agent goes away.
 	PaneAliases []string `json:"pane_aliases,omitempty"`
 }
 
-// ReconcilePlan lists the wakers to start and the records to stop/forget.
+// ReconcilePlan lists the panes to (re)adopt and the records to retire.
 type ReconcilePlan struct {
-	Start []AgentInfo
-	Stop  []WakerRecord
+	Start []AgentInfo   // panes whose live agent has no healthy, current waker
+	Stop  []WakerRecord // records whose pane hosts no agent any more
 }
 
 // Plan diffs live agents against recorded wakers. Every live agent is
-// wanted (unnamed ones get named at start). A record is stale when its pane
-// no longer hosts an agent, when a named agent's name differs from the
-// recorded handle, or when the process is dead (then it is forgotten and
-// restarted).
-func Plan(live []AgentInfo, wakers []WakerRecord, alive func(pid int) bool) ReconcilePlan {
+// wanted; a pane whose record is healthy (waker alive, handle matches the
+// live name, --inject-via is the current binary) is left alone, any other
+// live pane goes to Start, where ensure decides what to replace and keeps
+// the pane's previous handle. Only a record whose pane no longer hosts an
+// agent is retired outright.
+func Plan(live []AgentInfo, wakers []WakerRecord, alive func(WakerRecord) bool, selfBin string) ReconcilePlan {
 	want := map[string]AgentInfo{}
 	for _, a := range live {
 		want[a.PaneID] = a
@@ -52,15 +57,12 @@ func Plan(live []AgentInfo, wakers []WakerRecord, alive func(pid int) bool) Reco
 	var plan ReconcilePlan
 	for _, w := range wakers {
 		a, wanted := want[w.PaneID]
+		if !wanted {
+			plan.Stop = append(plan.Stop, w)
+			continue
+		}
 		name, named := Handle(a)
-		switch {
-		case !wanted:
-			plan.Stop = append(plan.Stop, w)
-		case named && name != w.Handle:
-			plan.Stop = append(plan.Stop, w)
-		case !alive(w.PID):
-			plan.Stop = append(plan.Stop, w) // forget the dead record; restart below
-		default:
+		if (!named || name == w.Handle) && w.SelfBin == selfBin && alive(w) {
 			covered[w.PaneID] = true
 		}
 	}

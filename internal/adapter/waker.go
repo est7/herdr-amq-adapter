@@ -71,6 +71,7 @@ func Spawn(spec WakerSpec) (WakerRecord, error) {
 		PID:         pid,
 		Cwd:         spec.Agent.Cwd,
 		Root:        spec.Root,
+		SelfBin:     spec.SelfBin,
 		StartedUnix: time.Now().Unix(),
 	}, nil
 }

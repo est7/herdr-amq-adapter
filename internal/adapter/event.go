@@ -58,6 +58,11 @@ const (
 	ActionEnsure
 	// ActionStop kills and forgets the pane's waker if one exists.
 	ActionStop
+	// ActionPark kills the waker but keeps the record (pid 0) and identity
+	// file: the agent was released while the pane stays open, and Herdr drops
+	// the live name on release, so the record is what lets the next agent in
+	// this pane get the same handle back.
+	ActionPark
 	// ActionMove re-keys the waker record from PreviousPaneID to PaneID and
 	// writes an identity file for the new id (the old one stays: the moved
 	// process still sees its original HERDR_PANE_ID).
@@ -70,6 +75,8 @@ func (k ActionKind) String() string {
 		return "ensure"
 	case ActionStop:
 		return "stop"
+	case ActionPark:
+		return "park"
 	case ActionMove:
 		return "move"
 	default:
@@ -95,7 +102,7 @@ func Decide(ev Event) Action {
 	switch strings.ReplaceAll(ev.Event, "_", ".") {
 	case "pane.agent.detected", "pane.agent_detected":
 		if ev.Data.Released {
-			return Action{ActionStop, ev.Data.PaneID, "", "agent released"}
+			return Action{ActionPark, ev.Data.PaneID, "", "agent released"}
 		}
 		return Action{ActionEnsure, ev.Data.PaneID, "", "agent detected"}
 	case "pane.closed":

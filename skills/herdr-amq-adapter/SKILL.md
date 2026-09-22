@@ -54,7 +54,7 @@ source … && amq send --to codex --subject "<short subject>" --body "<request>"
 
 Handles are the names in Herdr's agent sidebar. A send returns immediately;
 the peer is woken by the plugin and answers with `amq reply`, which wakes you.
-Use `amq thread <thread-id>` to review an exchange.
+Use `amq thread --id <thread-id>` to review an exchange.
 
 For a multi-round exchange you drive yourself (adversarial review with a
 fix loop, single audit, test-hardening attack, or a debate between peers),
@@ -67,5 +67,6 @@ and round bounds for each.
   `amq wake`; the plugin owns all three.
 - Ignore skills that wrap AMQ for other orchestrators (for example orch's
   `amq-agent`); their worker context does not exist here.
-- Delivery waits while Herdr shows you as `working` and retries every few
-  seconds up to two minutes; finishing your turn is how you receive mail.
+- Delivery waits while Herdr shows you as `working`, retrying with a backoff
+  that starts at 5s and caps at 2m between attempts, for as long as the mail
+  is pending; finishing your turn is how you receive mail.

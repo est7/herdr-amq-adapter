@@ -13,13 +13,19 @@ import (
 var herdrNameRe = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`)
 
 // ChooseHandle picks the AMQ handle for an agent. A Herdr live name wins
-// verbatim. Otherwise the agent kind ("claude", "codex", …) is the base and a
-// numeric suffix keeps it unique among the given taken names: claude,
+// verbatim. Otherwise preferred (the handle this pane used before its agent
+// restarted; Herdr drops the live name on release) is reused when no other
+// live agent holds it, so mail addressed to the old handle still reaches the
+// same pane. Otherwise the agent kind ("claude", "codex", …) is the base and
+// a numeric suffix keeps it unique among the given taken names: claude,
 // claude-2, claude-3 … The result always satisfies Herdr's name grammar so it
 // can be written back with `herdr agent rename`.
-func ChooseHandle(a AgentInfo, taken map[string]bool) string {
+func ChooseHandle(a AgentInfo, taken map[string]bool, preferred string) string {
 	if name, ok := Handle(a); ok {
 		return name
+	}
+	if preferred != "" && !taken[preferred] {
+		return preferred
 	}
 	base := "agent"
 	if a.Agent != nil && *a.Agent != "" {

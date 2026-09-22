@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 )
@@ -97,8 +99,69 @@ func Alive(pid int) bool {
 	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
-// Terminate sends SIGTERM to the waker's own process group (it was spawned
-// with setsid, so pid == pgid).
+// WakerAlive reports whether the record's pid is still exactly the waker it
+// was recorded as. A bare pid probe is not enough: after a reboot (the
+// startup reconcile path) the pid is routinely reused by an unrelated
+// process, which would leave the pane without a waker for good. The whole
+// `amq wake` argv the record implies must match the live command line, so a
+// stale waker for the same handle but another pane, root, or adapter binary
+// is not mistaken for the current one either.
+func WakerAlive(w WakerRecord) bool {
+	if !Alive(w.PID) {
+		return false
+	}
+	out, err := exec.Command("ps", "-p", strconv.Itoa(w.PID), "-o", "args=").Output()
+	if err != nil {
+		return false
+	}
+	want := AmqWakeArgs(w.SelfBin, w.Handle, w.PaneID, w.Root)
+	got := strings.Fields(string(out))
+	if len(got) < len(want)+1 {
+		return false
+	}
+	got = got[len(got)-len(want):]
+	for i := range want {
+		// A record written before self_bin existed cannot name its binary;
+		// accept whatever --inject-via it runs so it can be identified and
+		// then replaced (its SelfBin never equals the current binary).
+		if want[i] == "" && w.SelfBin == "" && i > 0 && want[i-1] == "--inject-via" {
+			continue
+		}
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// TerminateWaker stops the record's waker only after WakerAlive positively
+// identifies it. A pid that fails identification is never signalled: after
+// a reboot it may belong to an unrelated process group.
+func TerminateWaker(w WakerRecord) error {
+	if !WakerAlive(w) {
+		return nil
+	}
+	return Terminate(w.PID)
+}
+
+// Lock serialises lifecycle transitions (hook, reconcile) across processes.
+// Every transition is a multi-step read/spawn/write sequence over the same
+// records, identity files, and amq config; Herdr may run hooks concurrently.
+// The returned func releases the lock.
+func (s *Store) Lock() (func(), error) {
+	f, err := os.OpenFile(filepath.Join(s.dir, ".lock"), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return nil, fmt.Errorf("open lifecycle lock: %w", err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("acquire lifecycle lock: %w", err)
+	}
+	return func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN); f.Close() }, nil
+}
+
+// Terminate sends SIGTERM to the process group of a pid this process just
+// spawned (setsid, so pid == pgid). For a recorded pid use TerminateWaker.
 func Terminate(pid int) error {
 	if pid <= 0 {
 		return nil
