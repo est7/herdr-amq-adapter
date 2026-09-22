@@ -15,7 +15,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -85,12 +84,8 @@ func localAgents(e env) ([]string, error) {
 }
 
 func bridgeEnv(e env) (bridge.Env, bool, error) {
-	local, ok, err := bridge.LoadLocal(e.configDir)
-	if err != nil || !ok {
-		return bridge.Env{}, false, err
-	}
-	peers, err := bridge.ListPeers(e.configDir)
-	if err != nil {
+	snap, err := bridge.LoadSnapshot(e.configDir)
+	if err != nil || !snap.Configured {
 		return bridge.Env{}, false, err
 	}
 	agents, err := localAgents(e)
@@ -98,10 +93,10 @@ func bridgeEnv(e env) (bridge.Env, bool, error) {
 		return bridge.Env{}, false, err
 	}
 	url := ""
-	if local.RendezvousPort > 0 {
-		url = fmt.Sprintf("http://127.0.0.1:%d", local.RendezvousPort)
+	if snap.Local.RendezvousPort > 0 {
+		url = fmt.Sprintf("http://127.0.0.1:%d", snap.Local.RendezvousPort)
 	} else {
-		for _, p := range peers {
+		for _, p := range snap.Peers {
 			if p.RendezvousPort > 0 {
 				url = fmt.Sprintf("http://127.0.0.1:%d", p.RendezvousPort)
 				break
@@ -109,10 +104,15 @@ func bridgeEnv(e env) (bridge.Env, bool, error) {
 		}
 	}
 	return bridge.Env{
-		BridgeBin: e.bridgeBin, Root: e.root, StateDir: e.stateDir, Local: local, Peers: peers,
+		BridgeBin: e.bridgeBin, Root: e.root, StateDir: e.stateDir, Local: snap.Local, Peers: snap.Peers,
 		LocalAgents: agents, RendezvousURL: url,
 	}, true, nil
 }
+
+// reloadMarker is how `bridge ensure` asks a running instance to reload:
+// it touches this file and the runner compares its mtime every tick. No
+// pid is ever read or signalled.
+func reloadMarker(e env) string { return filepath.Join(e.stateDir, "bridge", "reload") }
 
 // bridgeRun is the long-lived federation process: single instance per
 // state dir, rendezvous server when this host serves it, SSH tunnel and
@@ -138,8 +138,6 @@ func bridgeRun() error {
 		return nil
 	}
 	defer lock.Close()
-	_ = lock.Truncate(0)
-	_, _ = lock.WriteAt([]byte(fmt.Sprint(os.Getpid())), 0)
 	benv, ok, err := bridgeEnv(e)
 	if err != nil {
 		return err
@@ -149,38 +147,37 @@ func bridgeRun() error {
 	}
 	// SIGTERM/SIGINT cancel the context, which kills the ssh tunnel and any
 	// courier in flight; without this a stopped runner leaves an orphan
-	// tunnel holding the loopback port. SIGHUP asks for an immediate config
-	// reload (bridge ensure sends it after a pairing change).
+	// tunnel holding the loopback port.
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
-	hup := make(chan os.Signal, 1)
-	signal.Notify(hup, syscall.SIGHUP)
 	store, err := rendezvous.Open(filepath.Join(e.stateDir, "bridge", "rendezvous"))
 	if err != nil {
 		return err
 	}
 	var srv *http.Server
 	servingPort := 0
+	// serveRendezvous switches the listener to port (0 = none). The new
+	// listener is bound before the old server is closed, so a failed bind
+	// leaves the old service running and the caller keeps the old topology.
 	serveRendezvous := func(port int) error {
 		if port == servingPort {
 			return nil
 		}
+		var next *http.Server
+		if port != 0 {
+			ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+			if err != nil {
+				return fmt.Errorf("rendezvous listen: %w", err)
+			}
+			next = &http.Server{Handler: store.Handler(), ReadHeaderTimeout: 10 * time.Second}
+			go func(s *http.Server) { _ = s.Serve(ln) }(next)
+			fmt.Printf("rendezvous serving on %s\n", ln.Addr())
+		}
 		if srv != nil {
 			_ = srv.Close()
-			srv, servingPort = nil, 0
-			fmt.Println("rendezvous stopped")
+			fmt.Printf("rendezvous on port %d stopped\n", servingPort)
 		}
-		if port == 0 {
-			return nil
-		}
-		ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
-		if err != nil {
-			return fmt.Errorf("rendezvous listen: %w", err)
-		}
-		srv = &http.Server{Handler: store.Handler(), ReadHeaderTimeout: 10 * time.Second}
-		servingPort = port
-		go func(s *http.Server) { _ = s.Serve(ln) }(srv)
-		fmt.Printf("rendezvous serving on %s\n", ln.Addr())
+		srv, servingPort = next, port
 		return nil
 	}
 	if err := serveRendezvous(benv.Local.RendezvousPort); err != nil {
@@ -191,36 +188,69 @@ func bridgeRun() error {
 			_ = srv.Close()
 		}
 	}()
-	tunnels := map[string]context.CancelFunc{}
-	reconcileTunnels := func(peers []bridge.Peer) {
-		want := map[string]bridge.Peer{}
+	type tunnel struct {
+		cancel context.CancelFunc
+		done   chan struct{}
+	}
+	tunnels := map[string]tunnel{}
+	tunnelKey := func(p bridge.Peer) string { return p.Host + "|" + p.SSHTarget + "|" + fmt.Sprint(p.RendezvousPort) }
+	// stopObsoleteTunnels cancels tunnels no longer wanted and waits for
+	// their ssh to exit, so a port they held is free before anything else
+	// (a local rendezvous after there->here) tries to bind it.
+	stopObsoleteTunnels := func(peers []bridge.Peer) {
+		want := map[string]bool{}
 		for _, p := range peers {
 			if p.SSHTarget != "" && p.RendezvousPort > 0 {
-				want[p.Host+"|"+p.SSHTarget+"|"+fmt.Sprint(p.RendezvousPort)] = p
+				want[tunnelKey(p)] = true
 			}
 		}
-		for key, cancel := range tunnels {
-			if _, still := want[key]; !still {
-				cancel()
+		for key, t := range tunnels {
+			if !want[key] {
+				t.cancel()
+				<-t.done
 				delete(tunnels, key)
 				fmt.Printf("tunnel %s stopped\n", key)
 			}
 		}
-		for key, p := range want {
+	}
+	startWantedTunnels := func(peers []bridge.Peer) {
+		for _, p := range peers {
+			if p.SSHTarget == "" || p.RendezvousPort == 0 {
+				continue
+			}
+			key := tunnelKey(p)
 			if _, running := tunnels[key]; running {
 				continue
 			}
 			tctx, tcancel := context.WithCancel(ctx)
-			tunnels[key] = tcancel
-			go keepTunnel(tctx, p)
+			done := make(chan struct{})
+			tunnels[key] = tunnel{cancel: tcancel, done: done}
+			go func(p bridge.Peer) { defer close(done); keepTunnel(tctx, p) }(p)
 		}
 	}
-	reconcileTunnels(benv.Peers)
+	// applyTopology commits a new configuration in a safe order: obsolete
+	// tunnels first (they may hold the port), then the rendezvous listener
+	// (bind-before-close), then new tunnels. A failed bind keeps the old
+	// listener and reports; the caller retries on the next reload.
+	applyTopology := func(next bridge.Env) error {
+		stopObsoleteTunnels(next.Peers)
+		if err := serveRendezvous(next.Local.RendezvousPort); err != nil {
+			startWantedTunnels(benv.Peers)
+			return err
+		}
+		startWantedTunnels(next.Peers)
+		return nil
+	}
+	startWantedTunnels(benv.Peers)
 	lastInventory := time.Time{}
-	reloadNow := false
+	markerSeen := markerTime(reloadMarker(e))
 	for {
-		if reloadNow || time.Since(lastInventory) >= inventoryEvery {
-			reloadNow = false
+		if now := markerTime(reloadMarker(e)); now.After(markerSeen) {
+			markerSeen = now
+			lastInventory = time.Time{}
+			fmt.Println("bridge run: reload requested")
+		}
+		if time.Since(lastInventory) >= inventoryEvery {
 			for _, p := range benv.Peers {
 				if p.SSHTarget == "" {
 					continue
@@ -234,11 +264,11 @@ func bridgeRun() error {
 			if err != nil || !ok {
 				return fmt.Errorf("reload bridge config: %v", err)
 			}
-			benv = fresh
-			if err := serveRendezvous(benv.Local.RendezvousPort); err != nil {
-				fmt.Printf("rendezvous: %v\n", err)
+			if err := applyTopology(fresh); err != nil {
+				fmt.Printf("topology: %v (keeping previous)\n", err)
+			} else {
+				benv = fresh
 			}
-			reconcileTunnels(benv.Peers)
 			if err := ensureAliasMailboxes(ctx, e, benv.Peers); err != nil {
 				fmt.Printf("alias mailboxes: %v\n", err)
 			}
@@ -262,12 +292,17 @@ func bridgeRun() error {
 		case <-ctx.Done():
 			fmt.Println("bridge run: stopping")
 			return nil
-		case <-hup:
-			fmt.Println("bridge run: reload requested")
-			reloadNow = true
 		case <-time.After(tickEvery):
 		}
 	}
+}
+
+func markerTime(path string) time.Time {
+	st, err := os.Stat(path)
+	if err != nil {
+		return time.Time{}
+	}
+	return st.ModTime()
 }
 
 // keepTunnel forwards the peer's rendezvous port to the same local loopback
@@ -383,9 +418,10 @@ func ensureAliasMailboxes(ctx context.Context, e env, peers []bridge.Peer) error
 }
 
 // bridgeEnsure starts `bridge run` detached when the bridge is configured.
-// When an instance already runs it is asked to reload (SIGHUP) instead, so
-// a pairing change takes effect immediately and no second instance is
-// ever spawned only to exit on the lock.
+// When an instance already runs it is asked to reload by touching the
+// reload marker (never by signalling a pid), so a pairing change takes
+// effect on the next tick and no second instance is spawned only to exit
+// on the lock.
 func bridgeEnsure() error {
 	e, err := loadEnv()
 	if err != nil {
@@ -394,11 +430,12 @@ func bridgeEnsure() error {
 	if _, ok, err := bridge.LoadLocal(e.configDir); err != nil || !ok {
 		return err
 	}
-	if pid, running := runningBridgePID(e); running {
-		if err := syscall.Kill(pid, syscall.SIGHUP); err == nil {
-			fmt.Printf("bridge run pid=%d reloading\n", pid)
-			return nil
+	if bridgeRunning(e) {
+		if err := touch(reloadMarker(e)); err != nil {
+			return err
 		}
+		fmt.Println("bridge run: reload requested")
+		return nil
 	}
 	if err := os.MkdirAll(e.logs, 0o755); err != nil {
 		return err
@@ -443,8 +480,8 @@ func bridgeStatus() error {
 	for _, p := range peers {
 		fmt.Printf("peer %s label=%s ssh=%s rendezvous_port=%d agents=%s\n", p.Host, p.Label, p.SSHTarget, p.RendezvousPort, strings.Join(p.Agents, ","))
 	}
-	if pid, running := runningBridgePID(e); running {
-		fmt.Printf("bridge run: running pid=%d\n", pid)
+	if bridgeRunning(e) {
+		fmt.Println("bridge run: running")
 	} else {
 		fmt.Println("bridge run: not running")
 	}
@@ -498,6 +535,9 @@ func peerAdd(args []string) error {
 	if *rendezvous != "there" && *rendezvous != "here" {
 		return errors.New("--rendezvous must be there or here")
 	}
+	if err := bridge.ValidPort(*port); err != nil {
+		return err
+	}
 	e, err := loadEnv()
 	if err != nil {
 		return err
@@ -541,18 +581,11 @@ func peerAdd(args []string) error {
 	if err := bridge.Trust(e.root, *host, accepted.Public); err != nil {
 		return err
 	}
-	var scratch bridge.Peer
-	local, err := bridge.UpdateLocal(e.configDir, func(l *bridge.Local) {
+	local, peer, err := bridge.UpdatePairing(e.configDir, *host, func(l *bridge.Local, p *bridge.Peer) error {
 		l.Host = *me
-		bridge.ApplyRendezvousRole(l, &scratch, *rendezvous == "here", *port)
-	})
-	if err != nil {
-		return err
-	}
-	peer, err = bridge.UpdatePeer(e.configDir, *host, func(p *bridge.Peer) {
 		p.Label, p.SSHTarget, p.RemoteAdapter = peer.Label, peer.SSHTarget, peer.RemoteAdapter
-		p.RendezvousPort = scratch.RendezvousPort
 		p.Agents = accepted.Agents
+		return bridge.ApplyRendezvousRole(l, p, *rendezvous == "here", *port)
 	})
 	if err != nil {
 		return err
@@ -611,6 +644,9 @@ func peerAccept(args []string) error {
 	if *host == "" || *peerHost == "" {
 		return errors.New("--host and --peer are required")
 	}
+	if err := bridge.ValidPort(*port); err != nil {
+		return err
+	}
 	e, err := loadEnv()
 	if err != nil {
 		return err
@@ -630,15 +666,9 @@ func peerAccept(args []string) error {
 	if err := bridge.Trust(e.root, *peerHost, string(record)); err != nil {
 		return err
 	}
-	var scratch bridge.Peer
-	if _, err := bridge.UpdateLocal(e.configDir, func(l *bridge.Local) {
+	if _, _, err := bridge.UpdatePairing(e.configDir, *peerHost, func(l *bridge.Local, p *bridge.Peer) error {
 		l.Host = *host
-		bridge.ApplyRendezvousRole(l, &scratch, *here, *port)
-	}); err != nil {
-		return err
-	}
-	if _, err := bridge.UpdatePeer(e.configDir, *peerHost, func(p *bridge.Peer) {
-		p.RendezvousPort = scratch.RendezvousPort
+		return bridge.ApplyRendezvousRole(l, p, *here, *port)
 	}); err != nil {
 		return err
 	}
@@ -704,21 +734,27 @@ func peerAliases(args []string) error {
 	return ensureAliasMailboxes(ctx, e, []bridge.Peer{p})
 }
 
-// runningBridgePID reports the pid holding the run lock, if any.
-func runningBridgePID(e env) (int, bool) {
+// bridgeRunning reports whether an instance holds the run lock.
+func bridgeRunning(e env) bool {
 	lock, err := os.OpenFile(filepath.Join(e.stateDir, "bridge", "run.lock"), os.O_RDWR, 0)
 	if err != nil {
-		return 0, false
+		return false
 	}
 	defer lock.Close()
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
-		_ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
-		return 0, false
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		return true
 	}
-	b, _ := io.ReadAll(lock)
-	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
-	if err != nil || pid <= 0 {
-		return 0, true
+	_ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	return false
+}
+
+func touch(path string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
 	}
-	return pid, true
+	now := time.Now()
+	if err := os.WriteFile(path, []byte(now.Format(time.RFC3339Nano)+"\n"), 0o600); err != nil {
+		return err
+	}
+	return os.Chtimes(path, now, now)
 }

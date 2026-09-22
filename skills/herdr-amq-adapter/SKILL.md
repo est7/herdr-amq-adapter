@@ -98,6 +98,8 @@ them is ordinary `amq send --to heping-codex`; nothing else changes.
   `amq wake`; the plugin owns all three.
 - Ignore skills that wrap AMQ for other orchestrators (for example orch's
   `amq-agent`); their worker context does not exist here.
-- Delivery waits while Herdr shows you as `working`, retrying with a backoff
-  that starts at 5s and caps at 2m between attempts, for as long as the mail
-  is pending; finishing your turn is how you receive mail.
+- Mail arrives while you work: the doorbell is queued into your running
+  turn like a user message. Delivery only waits while Herdr shows you as
+  `blocked` (an approval or question dialog), retrying with a backoff that
+  starts at 5s and caps at 2m between attempts for as long as the mail is
+  pending.

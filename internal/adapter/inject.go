@@ -37,14 +37,15 @@ func (o Outcome) ExitCode() int {
 }
 
 // GateOnStatus decides, from the agent's current Herdr status, whether to
-// submit now. Only a settled, input-ready agent gets the notice; a busy or
-// blocked one defers so amq retries on its own ladder (5s base, 2m cap, no
-// budget consumed). "unknown" cannot prove anything and is treated as ready,
-// matching Herdr's own guidance that it does not imply completion.
+// submit now. A working agent receives the notice: Claude Code and Codex
+// queue input typed mid-turn and surface it inside the running turn, which
+// is exactly how a doorbell should reach an agent that is busy. Only a
+// blocked agent (approval or question UI, where any keystroke could answer
+// the dialog) defers so amq retries on its own ladder (5s base, 2m cap, no
+// budget consumed). "unknown" cannot prove anything and is treated as
+// ready, matching Herdr's own guidance that it does not imply completion.
 func GateOnStatus(status string) (Outcome, bool) {
 	switch status {
-	case "working":
-		return Outcome{Progress: ProgressDeferred, Code: "agent_working", Note: "agent mid-turn; retry when settled"}, false
 	case "blocked":
 		return Outcome{Progress: ProgressDeferred, Code: "agent_blocked", Note: "agent at approval/question UI"}, false
 	default:

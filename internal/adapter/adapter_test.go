@@ -64,16 +64,15 @@ func TestClassifyPromptResult(t *testing.T) {
 }
 
 func TestGateOnStatus(t *testing.T) {
-	for _, st := range []string{"idle", "done", "unknown", ""} {
+	// working is deliverable: the agent queues the notice into its turn.
+	for _, st := range []string{"idle", "done", "working", "unknown", ""} {
 		if _, ready := GateOnStatus(st); !ready {
 			t.Errorf("status %q must be ready", st)
 		}
 	}
-	for _, st := range []string{"working", "blocked"} {
-		out, ready := GateOnStatus(st)
-		if ready || out.Progress != ProgressDeferred || out.ExitCode() != 1 {
-			t.Errorf("status %q: got ready=%v %+v; want deferred exit 1", st, ready, out)
-		}
+	out, ready := GateOnStatus("blocked")
+	if ready || out.Progress != ProgressDeferred || out.ExitCode() != 1 {
+		t.Errorf("blocked: got ready=%v %+v; want deferred exit 1", ready, out)
 	}
 }
 

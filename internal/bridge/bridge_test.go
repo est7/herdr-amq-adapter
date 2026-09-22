@@ -187,17 +187,50 @@ func TestSpoolsWithWorkSurfacesIOErrors(t *testing.T) {
 func TestRendezvousRoleTransitions(t *testing.T) {
 	var l Local
 	var p Peer
-	ApplyRendezvousRole(&l, &p, true, 18790)
-	if l.RendezvousPort != 18790 || p.RendezvousPort != 0 {
-		t.Fatalf("here: %+v %+v", l, p)
+	if err := ApplyRendezvousRole(&l, &p, true, 18790); err != nil || l.RendezvousPort != 18790 || p.RendezvousPort != 0 {
+		t.Fatalf("here: %+v %+v %v", l, p, err)
 	}
-	ApplyRendezvousRole(&l, &p, false, 18790)
-	if l.RendezvousPort != 0 || p.RendezvousPort != 18790 {
-		t.Fatalf("here->there must clear the local port: %+v %+v", l, p)
+	if err := ApplyRendezvousRole(&l, &p, false, 18790); err != nil || l.RendezvousPort != 0 || p.RendezvousPort != 18790 {
+		t.Fatalf("here->there must clear the local port: %+v %+v %v", l, p, err)
 	}
-	ApplyRendezvousRole(&l, &p, true, 19000)
+	if err := ApplyRendezvousRole(&l, &p, true, 19000); err != nil || l.RendezvousPort != 19000 || p.RendezvousPort != 0 {
+		t.Fatalf("there->here must clear the peer port: %+v %+v %v", l, p, err)
+	}
+	for _, bad := range []int{0, -1, 65536} {
+		if err := ApplyRendezvousRole(&l, &p, true, bad); err == nil {
+			t.Errorf("port %d accepted", bad)
+		}
+	}
 	if l.RendezvousPort != 19000 || p.RendezvousPort != 0 {
-		t.Fatalf("there->here must clear the peer port: %+v %+v", l, p)
+		t.Error("a rejected port must not change the topology")
+	}
+}
+
+// A pairing is one transaction: peer then local under one lock, host
+// immutability enforced, and a snapshot never sees half of it.
+func TestUpdatePairingAndSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	l, p, err := UpdatePairing(dir, "heping", func(l *Local, p *Peer) error {
+		l.Host = "mac"
+		p.SSHTarget = "remote_heping"
+		return ApplyRendezvousRole(l, p, false, 18790)
+	})
+	if err != nil || l.RendezvousPort != 0 || p.RendezvousPort != 18790 {
+		t.Fatalf("%+v %+v %v", l, p, err)
+	}
+	snap, err := LoadSnapshot(dir)
+	if err != nil || !snap.Configured || snap.Local.Host != "mac" || len(snap.Peers) != 1 || snap.Peers[0].RendezvousPort != 18790 {
+		t.Fatalf("snapshot %+v %v", snap, err)
+	}
+	if _, _, err := UpdatePairing(dir, "heping", func(l *Local, p *Peer) error { l.Host = "other"; return nil }); !errors.Is(err, ErrHostImmutable) {
+		t.Fatalf("rename accepted: %v", err)
+	}
+	if _, _, err := UpdatePairing(dir, "heping", func(l *Local, p *Peer) error { return ApplyRendezvousRole(l, p, true, 0) }); err == nil {
+		t.Fatal("invalid port must abort the transaction")
+	}
+	snap, _ = LoadSnapshot(dir)
+	if snap.Local.RendezvousPort != 0 || snap.Peers[0].RendezvousPort != 18790 {
+		t.Fatalf("failed transaction changed the topology: %+v", snap)
 	}
 }
 

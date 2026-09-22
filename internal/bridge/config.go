@@ -40,15 +40,95 @@ func ValidSSHTarget(t string) error {
 	return nil
 }
 
+// ValidPort accepts a TCP port for the rendezvous.
+func ValidPort(port int) error {
+	if port < 1 || port > 65535 {
+		return fmt.Errorf("rendezvous port %d must be in 1..65535", port)
+	}
+	return nil
+}
+
 // ApplyRendezvousRole sets both sides of the one-rendezvous invariant for
 // a pairing: exactly one of Local.RendezvousPort / Peer.RendezvousPort is
 // non-zero after any transition (here -> there or there -> here).
-func ApplyRendezvousRole(l *Local, p *Peer, here bool, port int) {
+func ApplyRendezvousRole(l *Local, p *Peer, here bool, port int) error {
+	if err := ValidPort(port); err != nil {
+		return err
+	}
 	if here {
 		l.RendezvousPort, p.RendezvousPort = port, 0
 	} else {
 		l.RendezvousPort, p.RendezvousPort = 0, port
 	}
+	return nil
+}
+
+// Snapshot is a consistent read of the whole bridge configuration.
+type Snapshot struct {
+	Local      Local
+	Configured bool
+	Peers      []Peer
+}
+
+// LoadSnapshot reads local config and every peer under the config lock, so
+// a reader never sees a pairing half-written.
+func LoadSnapshot(configDir string) (Snapshot, error) {
+	unlock, err := lockConfig(configDir)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	defer unlock()
+	l, ok, err := LoadLocal(configDir)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	peers, err := ListPeers(configDir)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	return Snapshot{Local: l, Configured: ok, Peers: peers}, nil
+}
+
+// UpdatePairing applies one coupled change to the local config and one
+// peer under a single lock acquisition, writing the peer first and the
+// local record last so a crash in between leaves the previous local role
+// (the runner keeps serving what it served) rather than a half topology.
+func UpdatePairing(configDir, peerHost string, fn func(*Local, *Peer) error) (Local, Peer, error) {
+	unlock, err := lockConfig(configDir)
+	if err != nil {
+		return Local{}, Peer{}, err
+	}
+	defer unlock()
+	l, existed, err := LoadLocal(configDir)
+	if err != nil {
+		return Local{}, Peer{}, err
+	}
+	p, _, err := LoadPeer(configDir, peerHost)
+	if err != nil {
+		return Local{}, Peer{}, err
+	}
+	p.Host = peerHost
+	before := l.Host
+	if err := fn(&l, &p); err != nil {
+		return Local{}, Peer{}, err
+	}
+	if existed && before != "" && l.Host != before {
+		return Local{}, Peer{}, fmt.Errorf("%w: is %q, update wanted %q", ErrHostImmutable, before, l.Host)
+	}
+	if p.RemoteAdapter != "" {
+		if err := ValidRemotePath(p.RemoteAdapter); err != nil {
+			return Local{}, Peer{}, err
+		}
+	}
+	if p.SSHTarget != "" {
+		if err := ValidSSHTarget(p.SSHTarget); err != nil {
+			return Local{}, Peer{}, err
+		}
+	}
+	if err := SavePeer(configDir, p); err != nil {
+		return Local{}, Peer{}, err
+	}
+	return l, p, SaveLocal(configDir, l)
 }
 
 // ValidHost is amq-bridge's host alias grammar (also a valid Herdr name

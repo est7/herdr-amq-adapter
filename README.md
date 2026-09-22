@@ -38,7 +38,7 @@ ln -s "$PWD/skills/herdr-amq-adapter" ~/.claude/skills/herdr-amq-adapter   # Cla
 | moment | plugin action |
 |---|---|
 | Herdr detects an agent in a pane | if unnamed, `herdr agent rename` it `<kind>` or `<kind>-N` (claude, codex-2 …); provision its mailbox in the shared root (`amq init --force` with the merged agent list); write the pane's identity file; spawn a detached `amq wake` for it |
-| mail arrives for that handle | `amq wake` calls `inject`; it reads the agent's live status, and if `idle`/`done`/`unknown` submits the notice with `herdr agent prompt` |
+| mail arrives for that handle | `amq wake` calls `inject`; it reads the agent's live status and submits the notice with `herdr agent prompt` unless the agent is `blocked` (a working agent queues it into its turn) |
 | `herdr pane move` gives the pane a new id | re-key the record, write an identity file for the new id, keep the old one (the moved process still sees its original `HERDR_PANE_ID`); the waker is untouched because delivery targets the agent **name**, which Herdr carries across moves |
 | agent released, pane stays open | retire the waker; keep the record (pid 0) and identity file so the next agent detected in this pane is offered the same handle (Herdr drops the live name on release) |
 | pane closed or exited | retire the waker, remove identity files (current id and aliases) and the record |
@@ -78,9 +78,8 @@ identity file mentioned in the notice.
 
 | observed | marker | exit | meaning |
 |---|---|---|---|
-| status `idle` / `done` / `unknown`, prompt exit 0 | `accepted` | 0 | text + Enter written; cohort acknowledged (`--retry-until injected`) |
-| status `working` | `deferred` | 1 | mid-turn; amq retries on its ladder (5s base, 2m cap, no budget spent) |
-| status `blocked`, or prompt returns `agent_blocked` | `deferred` | 1 | approval / question UI; same ladder |
+| status `idle` / `done` / `working` / `unknown`, prompt exit 0 | `accepted` | 0 | text + Enter written; cohort acknowledged (`--retry-until injected`). A working agent queues the notice into its turn |
+| status `blocked`, or prompt returns `agent_blocked` | `deferred` | 1 | approval / question UI; amq retries on its ladder (5s base, 2m cap, no budget spent) |
 | `agent_not_found`, `agent_prompt_stalled`, timeout, usage | `failed` | 1 | terminal for this cohort; a new inbox change re-arms |
 
 `deferred` must exit non-zero: amq's `classifyInjectViaResult` treats a
@@ -148,8 +147,10 @@ exchange on both machines.
 
 ## Known gaps
 
-- Status read and prompt are two calls; an agent that starts a turn in
-  between gets the notice queued mid-turn (nothing is lost).
+- Status read and prompt are two calls; an agent that opens an approval
+  dialog in between gets the notice as a keystroke into that dialog (Herdr
+  refuses the prompt when it already sees `blocked`, so the window is the
+  gap between the two calls).
 - One shared root per user, not per project; handles are global across
   Herdr workspaces.
 - Unix only (`setsid`).
