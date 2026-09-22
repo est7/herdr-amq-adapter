@@ -116,7 +116,37 @@ func runHook() error {
 		return ensure(e, act.PaneID)
 	case adapter.ActionStop:
 		return stop(e, act.PaneID)
+	case adapter.ActionMove:
+		return move(e, act.PreviousPaneID, act.PaneID)
 	}
+	return nil
+}
+
+// move re-keys a waker record after `herdr pane move`. The waker itself keeps
+// running: it targets the agent by handle, which Herdr carries across moves.
+// The old identity file stays because the moved process still sees its
+// original HERDR_PANE_ID; it is removed with the record at stop time.
+func move(e env, oldPane, newPane string) error {
+	rec, ok, err := e.store.Get(oldPane)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		fmt.Printf("pane %s moved to %s but had no waker record; adopting fresh\n", oldPane, newPane)
+		return ensure(e, newPane)
+	}
+	rec.PaneAliases = append(rec.PaneAliases, oldPane)
+	rec.PaneID = newPane
+	if err := e.store.Put(rec); err != nil {
+		return err
+	}
+	if err := e.store.Delete(oldPane); err != nil {
+		return err
+	}
+	if err := adapter.WriteIdentity(e.configDir, adapter.Identity{PaneID: newPane, Handle: rec.Handle, Root: rec.Root}); err != nil {
+		return err
+	}
+	fmt.Printf("moved pane=%s -> %s handle=%s waker pid=%d\n", oldPane, newPane, rec.Handle, rec.PID)
 	return nil
 }
 
@@ -156,10 +186,7 @@ func ensure(e env, paneID string) error {
 			return err
 		}
 	}
-	if err := adapter.EnsureRoot(ctx, e.amq, e.root, handle); err != nil {
-		return err
-	}
-	if err := adapter.RegisterHandle(e.root, handle); err != nil {
+	if err := adapter.EnsureMailbox(ctx, e.amq, e.root, handle); err != nil {
 		return err
 	}
 	id := adapter.Identity{PaneID: paneID, Handle: handle, Root: e.root}
@@ -192,6 +219,11 @@ func stop(e env, paneID string) error {
 	if !ok {
 		fmt.Printf("pane %s has no waker record\n", paneID)
 		return nil
+	}
+	for _, alias := range rec.PaneAliases {
+		if err := adapter.RemoveIdentity(e.configDir, alias); err != nil {
+			return err
+		}
 	}
 	if err := adapter.Terminate(rec.PID); err != nil {
 		return fmt.Errorf("terminate pid %d: %w", rec.PID, err)
@@ -252,6 +284,7 @@ func runStatus() error {
 }
 
 // runInject is invoked by amq as `<self> inject <pane_id> <handle> <root> <payload>`.
+// pane_id only names the identity file; delivery targets the handle.
 // It speaks the AMQ_INJECT_PROGRESS protocol on stderr and never echoes the
 // payload.
 func runInject(args []string) int {
@@ -263,7 +296,9 @@ func runInject(args []string) int {
 	configDir := os.Getenv("HERDR_PLUGIN_CONFIG_DIR")
 	id := adapter.Identity{PaneID: paneID, Handle: handle, Root: root}
 	text := adapter.Notice(payload, id, adapter.IdentityPath(configDir, paneID))
-	out, _ := adapter.HerdrFromEnv().Prompt(paneID, text, promptTimeout)
+	// Target the agent by its live name, not the pane: the name follows the
+	// occupant across `herdr pane move`, the pane id does not.
+	out, _ := adapter.HerdrFromEnv().Prompt(handle, text, promptTimeout)
 	fmt.Fprintf(os.Stderr, "AMQ_INJECT_PROGRESS=%s\n", out.Progress)
 	if out.Code != "" {
 		fmt.Fprintf(os.Stderr, "herdr-amq-adapter: inject pane=%s %s %s\n", paneID, out.Code, out.Note)

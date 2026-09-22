@@ -96,17 +96,26 @@ func TestChooseHandle(t *testing.T) {
 	}
 }
 
-func TestAddAgent(t *testing.T) {
+func TestAgentsWith(t *testing.T) {
 	in := []byte(`{"version":1,"created_utc":"x","agents":["codex"]}`)
-	out, changed, err := AddAgent(in, "claude")
-	if err != nil || !changed {
-		t.Fatalf("changed=%v err=%v", changed, err)
+	got, changed, err := AgentsWith(in, "claude")
+	if err != nil || !changed || !reflect.DeepEqual(got, []string{"claude", "codex"}) {
+		t.Fatalf("got %v changed=%v err=%v", got, changed, err)
 	}
-	if string(out) != "{\n  \"agents\": [\n    \"claude\",\n    \"codex\"\n  ],\n  \"created_utc\": \"x\",\n  \"version\": 1\n}\n" {
-		t.Errorf("unexpected config: %s", out)
+	if _, changed, _ := AgentsWith(in, "codex"); changed {
+		t.Error("existing handle must not report a change")
 	}
-	if _, changed, _ := AddAgent(out, "claude"); changed {
-		t.Error("re-adding must be a no-op")
+}
+
+func TestDecideMove(t *testing.T) {
+	raw := `{"event":"pane_moved","data":{"previous_pane_id":"w8:p7","previous_workspace_id":"w8","previous_tab_id":"w8:t2","pane":{"pane_id":"wB:p2","workspace_id":"wB"}}}`
+	ev, err := ParseEvent(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	act := Decide(ev)
+	if act.Kind != ActionMove || act.PaneID != "wB:p2" || act.PreviousPaneID != "w8:p7" {
+		t.Errorf("got %+v", act)
 	}
 }
 
@@ -119,8 +128,8 @@ func TestIdentityRenderAndNotice(t *testing.T) {
 	if p := IdentityPath("/cfg", "w1:p2"); p != "/cfg/panes/w1_p2.env" {
 		t.Errorf("path %q", p)
 	}
-	n := Notice("AMQ [1]: message from codex\n", id, "/cfg/panes/w1_p2.env")
-	if n != "AMQ [1]: message from codex — you are AMQ agent claude; to read and reply run: source '/cfg/panes/w1_p2.env' && amq drain" {
+	n := Notice("AMQ doorbell run amq drain --include-body then act on it\n", id, "/cfg/panes/w1_p2.env")
+	if n != "AMQ doorbell run amq drain --include-body then act on it (you are claude in Herdr; first: source '/cfg/panes/w1_p2.env')" {
 		t.Errorf("notice %q", n)
 	}
 }

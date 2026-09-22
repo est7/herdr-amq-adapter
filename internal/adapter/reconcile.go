@@ -27,6 +27,9 @@ type WakerRecord struct {
 	Cwd         string `json:"cwd"`
 	Root        string `json:"root"`
 	StartedUnix int64  `json:"started_unix"`
+	// PaneAliases are earlier pane ids of the same occupant (after moves);
+	// their identity files are kept alive until the agent goes away.
+	PaneAliases []string `json:"pane_aliases,omitempty"`
 }
 
 // ReconcilePlan lists the wakers to start and the records to stop/forget.

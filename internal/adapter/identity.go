@@ -115,46 +115,33 @@ func RemoveIdentity(configDir, paneID string) error {
 	return err
 }
 
-// amqConfig mirrors <root>/meta/config.json; unknown fields are preserved
-// by round-tripping through a map.
-type amqConfig map[string]any
-
-// AddAgent registers handle in an amq config.json document, returning the
-// updated bytes and whether anything changed. Keeping config.json in sync
-// silences amq's "handle not in config.json" warning and makes `amq who`
-// list every Herdr agent.
-func AddAgent(configJSON []byte, handle string) ([]byte, bool, error) {
-	var cfg amqConfig
+// AgentsWith returns the agents listed in an amq config.json plus handle,
+// sorted, and whether handle was missing. The caller re-runs
+// `amq init --force --agents <list>` so amq itself creates the mailbox
+// directories (inbox/new,cur,tmp, dlq, outbox/sent, receipts) with its own
+// validation and fsync discipline; a waker started against a handle without
+// those directories never acquires its inbox watcher.
+func AgentsWith(configJSON []byte, handle string) ([]string, bool, error) {
+	var cfg struct {
+		Agents []string `json:"agents"`
+	}
 	if err := json.Unmarshal(configJSON, &cfg); err != nil {
 		return nil, false, fmt.Errorf("decode amq config: %w", err)
 	}
-	var agents []string
-	if raw, ok := cfg["agents"].([]any); ok {
-		for _, v := range raw {
-			if s, ok := v.(string); ok {
-				agents = append(agents, s)
-			}
-		}
-	}
-	for _, a := range agents {
+	for _, a := range cfg.Agents {
 		if a == handle {
-			return configJSON, false, nil
+			return cfg.Agents, false, nil
 		}
 	}
-	agents = append(agents, handle)
+	agents := append(append([]string{}, cfg.Agents...), handle)
 	sort.Strings(agents)
-	cfg["agents"] = agents
-	out, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return nil, false, err
-	}
-	return append(out, '\n'), true, nil
+	return agents, true, nil
 }
 
-// Notice is the text actually submitted to the agent: amq's sanitized
-// notification first, then a one-line, copy-pasteable way to act on it that
-// needs no prior context or environment.
+// Notice is the text actually submitted to the agent: amq's own doorbell
+// (which already says what to run) plus the identity it needs first. Kept to
+// one line so it survives any input mode.
 func Notice(payload string, id Identity, identityPath string) string {
-	return fmt.Sprintf("%s — you are AMQ agent %s; to read and reply run: source %s && amq drain",
+	return fmt.Sprintf("%s (you are %s in Herdr; first: source %s)",
 		strings.TrimSpace(payload), id.Handle, shellQuote(identityPath))
 }

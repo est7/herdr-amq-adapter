@@ -24,6 +24,10 @@ command = ["bin/herdr-amq-adapter", "hook"]
 on = "pane.exited"
 command = ["bin/herdr-amq-adapter", "hook"]
 
+[[events]]
+on = "pane.moved"
+command = ["bin/herdr-amq-adapter", "hook"]
+
 [[actions]]
 id = "reconcile"
 title = "AMQ: reconcile wakers"

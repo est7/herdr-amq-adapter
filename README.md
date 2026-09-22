@@ -12,8 +12,8 @@ agent A pane ──amq send --to claude──▶ shared AMQ root ──▶ amq w
                        herdr-amq-adapter inject <pane> claude <root> <notice>
                                                                │ status gate + prompt
                                                                ▼
-                     herdr agent prompt <pane> "AMQ [..]: message from A — you are
-                     AMQ agent claude; to read and reply run: source <identity> && amq drain"
+                     herdr agent prompt claude "AMQ doorbell run amq drain --include-body then
+                     act on it (you are claude in Herdr; first: source <identity>)"
 ```
 
 ## Install
@@ -37,9 +37,10 @@ ln -s "$PWD/skills/herdr-amq-adapter" ~/.claude/skills/herdr-amq-adapter   # Cla
 
 | moment | plugin action |
 |---|---|
-| Herdr detects an agent in a pane | if unnamed, `herdr agent rename` it `<kind>` or `<kind>-N` (claude, codex-2 …); register that handle in the shared root; write the pane's identity file; spawn a detached `amq wake` for it |
+| Herdr detects an agent in a pane | if unnamed, `herdr agent rename` it `<kind>` or `<kind>-N` (claude, codex-2 …); provision its mailbox in the shared root (`amq init --force` with the merged agent list); write the pane's identity file; spawn a detached `amq wake` for it |
 | mail arrives for that handle | `amq wake` calls `inject`; it reads the agent's live status, and if `idle`/`done`/`unknown` submits the notice with `herdr agent prompt` |
-| agent released / pane closed or exited | SIGTERM the waker, remove identity file and record |
+| `herdr pane move` gives the pane a new id | re-key the record, write an identity file for the new id, keep the old one (the moved process still sees its original `HERDR_PANE_ID`); the waker is untouched because delivery targets the agent **name**, which Herdr carries across moves |
+| agent released / pane closed or exited | SIGTERM the waker, remove identity files (current id and aliases) and the record |
 | Herdr session restore, or action `reconcile` | diff live agents vs records: retire stale, adopt missing |
 
 Paths (fixed, per user):
@@ -57,7 +58,9 @@ reviewer …`) and that name is used verbatim.
 ## Injector protocol
 
 `amq wake` runs `<self> inject <pane> <handle> <root> <payload>` per
-notification and reads `AMQ_INJECT_PROGRESS=<marker>` from stderr.
+notification and reads `AMQ_INJECT_PROGRESS=<marker>` from stderr. The
+prompt targets `<handle>` (the Herdr live name); `<pane>` only selects the
+identity file mentioned in the notice.
 
 | observed | marker | exit | meaning |
 |---|---|---|---|
