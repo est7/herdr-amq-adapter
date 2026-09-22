@@ -91,8 +91,9 @@ func CourierArgs(s CourierSpec) []string {
 	}
 }
 
-// CourierResult is what one cycle reported: receipts for pushed or applied
-// transfers. amq-bridge prints one JSON receipt per line.
+// CourierResult is one receipt a cycle reported: transport_accepted for a
+// push, destination_maildir_committed for an apply. amq-bridge prints one
+// JSON object per line.
 type CourierResult struct {
 	Stage           string `json:"stage"`
 	TransferID      string `json:"transfer_id"`
@@ -100,26 +101,74 @@ type CourierResult struct {
 	CommittedPath   string `json:"committed_path"`
 }
 
-// RunCourier executes one cycle and returns its receipts. A cycle with
-// nothing to do exits 0 with no output.
-func RunCourier(ctx context.Context, bridgeBin string, s CourierSpec) ([]CourierResult, error) {
-	cmd := exec.CommandContext(ctx, bridgeBin, CourierArgs(s)...)
-	var out, errb bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &out, &errb
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("amq-bridge %s %s/%s: %w: %s", s.Mode, s.LocalHost, s.LocalAgent, err, strings.TrimSpace(errb.String()))
-	}
-	var results []CourierResult
-	for _, line := range strings.Split(out.String(), "\n") {
+// RefusedTransfer is an envelope the poll skipped instead of applying:
+// an uncertain ledger history (retried by redelivery) or a terminal
+// conflict (operator action). amq-bridge prints them as one
+// {"refused":[...]} line after the receipts.
+type RefusedTransfer struct {
+	TransferID string `json:"transfer_id"`
+	Reason     string `json:"reason"`
+	Uncertain  bool   `json:"uncertain"`
+	Conflict   bool   `json:"conflict"`
+}
+
+// CourierOutcome is everything one cycle printed, kept apart by kind so a
+// refusal or an unresolved-ledger diagnostic is never mistaken for a blank
+// receipt. Diagnostics are upstream's own JSON, retained verbatim.
+type CourierOutcome struct {
+	Receipts    []CourierResult
+	Refused     []RefusedTransfer
+	Diagnostics []json.RawMessage
+}
+
+// ParseCourierOutput classifies amq-bridge's stdout lines. A line with a
+// "stage" is a receipt, a line with "refused" carries refusals, any other
+// JSON object is a diagnostic; non-JSON lines are ignored. A malformed
+// JSON line is an error: the contract is one object per line.
+func ParseCourierOutput(stdout []byte) (CourierOutcome, error) {
+	var out CourierOutcome
+	for _, line := range strings.Split(string(stdout), "\n") {
 		line = strings.TrimSpace(line)
 		if !strings.HasPrefix(line, "{") {
 			continue
 		}
-		var r CourierResult
-		if err := json.Unmarshal([]byte(line), &r); err != nil {
-			return nil, fmt.Errorf("decode courier receipt: %w", err)
+		var probe map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(line), &probe); err != nil {
+			return CourierOutcome{}, fmt.Errorf("decode courier output %q: %w", line, err)
 		}
-		results = append(results, r)
+		switch {
+		case probe["stage"] != nil:
+			var r CourierResult
+			if err := json.Unmarshal([]byte(line), &r); err != nil {
+				return CourierOutcome{}, fmt.Errorf("decode courier receipt: %w", err)
+			}
+			out.Receipts = append(out.Receipts, r)
+		case probe["refused"] != nil:
+			var r struct {
+				Refused []RefusedTransfer `json:"refused"`
+			}
+			if err := json.Unmarshal([]byte(line), &r); err != nil {
+				return CourierOutcome{}, fmt.Errorf("decode courier refusals: %w", err)
+			}
+			out.Refused = append(out.Refused, r.Refused...)
+		default:
+			out.Diagnostics = append(out.Diagnostics, json.RawMessage(line))
+		}
 	}
-	return results, nil
+	return out, nil
+}
+
+// RunCourier executes one cycle. Whatever the process printed is returned
+// even when it exits non-zero, so partial receipts and diagnostics are not
+// lost with the failure.
+func RunCourier(ctx context.Context, bridgeBin string, s CourierSpec) (CourierOutcome, error) {
+	cmd := exec.CommandContext(ctx, bridgeBin, CourierArgs(s)...)
+	var out, errb bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &errb
+	runErr := cmd.Run()
+	outcome, parseErr := ParseCourierOutput(out.Bytes())
+	if runErr != nil {
+		return outcome, fmt.Errorf("amq-bridge %s %s/%s: %w: %s", s.Mode, s.LocalHost, s.LocalAgent, runErr, strings.TrimSpace(errb.String()))
+	}
+	return outcome, parseErr
 }

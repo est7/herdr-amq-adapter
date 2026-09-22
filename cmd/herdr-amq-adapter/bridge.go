@@ -285,6 +285,16 @@ func bridgeRun() error {
 		for _, r := range rep.Applied {
 			fmt.Printf("applied %s -> %s\n", r.SourceMessageID, r.CommittedPath)
 		}
+		for _, r := range rep.Refused {
+			kind := "uncertain (redelivered later)"
+			if r.Conflict {
+				kind = "conflict (operator action: clear it at the rendezvous)"
+			}
+			fmt.Printf("refused transfer=%s %s: %s\n", r.TransferID, kind, r.Reason)
+		}
+		for _, d := range rep.Diagnostics {
+			fmt.Printf("diagnostic %s\n", d)
+		}
 		for _, err := range rep.Errors {
 			fmt.Printf("tick: %v\n", err)
 		}

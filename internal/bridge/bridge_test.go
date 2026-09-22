@@ -264,3 +264,57 @@ func TestValidSSHTarget(t *testing.T) {
 		}
 	}
 }
+
+// amq-bridge 0.80.1 prints receipts, then one {"refused":[...]} line, then
+// unresolved-ledger diagnostics; each must land in its own bucket, never
+// as a blank receipt.
+func TestParseCourierOutputSeparatesKinds(t *testing.T) {
+	cases := []struct {
+		name                 string
+		stdout               string
+		receipts, refused    int
+		diags                int
+		wantErr              bool
+		firstRefusedConflict bool
+	}{
+		{"receipts only", `{"stage":"transport_accepted","transfer_id":"t1","payload_sha256":"a","source_message_id":"m1","emitted_at":"x"}
+{"stage":"destination_maildir_committed","transfer_id":"t2","payload_sha256":"b","source_message_id":"m2","committed_path":"/p","emitted_at":"x"}`, 2, 0, 0, false, false},
+		{"refusal only", `{"refused":[{"transfer_id":"t3","reason":"transfer digest conflict","conflict":true}]}`, 0, 1, 0, false, true},
+		{"mixed with diagnostic", `{"stage":"transport_accepted","transfer_id":"t1","payload_sha256":"a","emitted_at":"x"}
+{"refused":[{"transfer_id":"t4","reason":"uncertain ledger history","uncertain":true}]}
+{"transfer_id":"t5","state":"prepared","age":"3m"}
+not json at all`, 1, 1, 1, false, false},
+		{"malformed", `{"stage":`, 0, 0, 0, true, false},
+		{"empty", ``, 0, 0, 0, false, false},
+	}
+	for _, c := range cases {
+		out, err := ParseCourierOutput([]byte(c.stdout))
+		if (err != nil) != c.wantErr {
+			t.Errorf("%s: err=%v", c.name, err)
+			continue
+		}
+		if len(out.Receipts) != c.receipts || len(out.Refused) != c.refused || len(out.Diagnostics) != c.diags {
+			t.Errorf("%s: got %d/%d/%d want %d/%d/%d", c.name, len(out.Receipts), len(out.Refused), len(out.Diagnostics), c.receipts, c.refused, c.diags)
+		}
+		if c.refused > 0 && out.Refused[0].Conflict != c.firstRefusedConflict {
+			t.Errorf("%s: conflict flag %v", c.name, out.Refused[0].Conflict)
+		}
+	}
+}
+
+// A non-zero exit must not discard what the courier already printed.
+func TestRunCourierKeepsOutputOnFailure(t *testing.T) {
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "fake-amq-bridge")
+	script := "#!/bin/sh\necho '{\"stage\":\"transport_accepted\",\"transfer_id\":\"t1\",\"payload_sha256\":\"a\",\"emitted_at\":\"x\"}'\necho '{\"refused\":[{\"transfer_id\":\"t2\",\"reason\":\"conflict\",\"conflict\":true}]}'\necho 'rendezvous unreachable' >&2\nexit 1\n"
+	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out, err := RunCourier(context.Background(), fake, CourierSpec{Root: dir, RendezvousURL: "http://127.0.0.1:1", LocalHost: "mac", LocalAgent: "a", SourceHandle: "mac-a", Mode: "push"})
+	if err == nil || !strings.Contains(err.Error(), "rendezvous unreachable") {
+		t.Fatalf("err %v", err)
+	}
+	if len(out.Receipts) != 1 || len(out.Refused) != 1 {
+		t.Fatalf("partial output lost: %+v", out)
+	}
+}

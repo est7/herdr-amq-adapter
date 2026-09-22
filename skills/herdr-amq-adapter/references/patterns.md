@@ -10,8 +10,9 @@ orch's workflow presets; the mechanics are plain AMQ.
 - **Brief first.** The peer sees only the mail. Put the task, the tree
   location (cwd, branch, `git diff` range), and the role prompt in the
   body. Nothing in your context reaches them.
-- **One thread per exchange.** Open with `amq send`; every later turn is
-  `amq reply --id <last message id>` so the thread stays intact and
+- **One thread per exchange.** Open with `amq send`; every later turn
+  replies to the last message (`amq reply --id`, or `amq send --thread`
+  when reply reports `message not found`) so the thread stays intact and
   `amq thread` shows the whole history.
 - **Verdict line.** Ask the peer to start their reply with one of the
   exact markers named in the pattern (for example `verdict: approve`).

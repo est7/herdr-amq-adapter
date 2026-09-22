@@ -25,10 +25,12 @@ type Env struct {
 
 // Report is what one tick did; the runner logs it.
 type Report struct {
-	Forwarded []string        // "<sender> -> <host>/<agent> <id>"
-	Pushed    []CourierResult // transport_accepted receipts
-	Applied   []CourierResult // destination_maildir_committed receipts
-	Errors    []error
+	Forwarded   []string          // "<sender> -> <host>/<agent> <id>"
+	Pushed      []CourierResult   // transport_accepted receipts
+	Applied     []CourierResult   // destination_maildir_committed receipts
+	Refused     []RefusedTransfer // envelopes the poll skipped (uncertain or conflict)
+	Diagnostics []json.RawMessage // upstream unresolved-ledger diagnostics, verbatim
+	Errors      []error
 }
 
 // Tick runs one bounded round: forward alias-mailbox mail into spools, push
@@ -70,11 +72,12 @@ func Tick(ctx context.Context, env Env) Report {
 			Root: env.Root, RendezvousURL: env.RendezvousURL, LocalHost: env.Local.Host, LocalAgent: sender,
 			SourceHandle: src, DestAliases: destAliases, PeerHosts: peerHosts, Mode: "push",
 		})
+		rep.Pushed = append(rep.Pushed, res.Receipts...)
+		rep.Refused = append(rep.Refused, res.Refused...)
+		rep.Diagnostics = append(rep.Diagnostics, res.Diagnostics...)
 		if err != nil {
 			rep.Errors = append(rep.Errors, err)
-			continue
 		}
-		rep.Pushed = append(rep.Pushed, res...)
 	}
 	// poll: one cycle per local agent
 	for _, agent := range env.LocalAgents {
@@ -82,11 +85,12 @@ func Tick(ctx context.Context, env Env) Report {
 			Root: env.Root, RendezvousURL: env.RendezvousURL, LocalHost: env.Local.Host, LocalAgent: agent,
 			SourceHandle: AliasHandle(env.Local.Host, agent), DestAliases: destAliases, PeerHosts: peerHosts, Mode: "poll",
 		})
+		rep.Applied = append(rep.Applied, res.Receipts...)
+		rep.Refused = append(rep.Refused, res.Refused...)
+		rep.Diagnostics = append(rep.Diagnostics, res.Diagnostics...)
 		if err != nil {
 			rep.Errors = append(rep.Errors, err)
-			continue
 		}
-		rep.Applied = append(rep.Applied, res...)
 	}
 	return rep
 }
