@@ -249,3 +249,113 @@ func TestArchivingTheLastAgentKeepsItsTombstone(t *testing.T) {
 	}
 	_ = state
 }
+
+func mailboxRoot(t *testing.T, root string, agents ...string) {
+	t.Helper()
+	for _, h := range agents {
+		if err := os.MkdirAll(filepath.Join(root, "agents", h, "inbox", "new"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.MkdirAll(filepath.Join(root, "meta"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := `{"agents":["` + strings.Join(agents, `","`) + `"]}`
+	if err := os.WriteFile(filepath.Join(root, "meta", "config.json"), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func fakeAmq(t *testing.T) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "amq")
+	if err := os.WriteFile(p, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// G6: writing the marker never follows a link planted under its name.
+func TestArchiveMarkerNeverFollowsALink(t *testing.T) {
+	state, root, s := setupGC(t)
+	mailboxRoot(t, root, "gone", "keep")
+	victim := filepath.Join(t.TempDir(), "user-file")
+	if err := os.WriteFile(victim, []byte("precious"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, filepath.Join(root, "agents", "gone", archiveMarker)); err != nil {
+		t.Fatal(err)
+	}
+	if err := RunGC(context.Background(), fakeAmq(t), root, s, GCPlan{Archive: []string{"gone"}}, time.Unix(1790600000, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(victim); string(b) != "precious" {
+		t.Fatalf("file behind the link was overwritten: %q", b)
+	}
+	if got, _ := s.Archives(); len(got) != 1 || got[0].ArchivedUnix != 1790600000 {
+		t.Fatalf("archives %+v", got)
+	}
+	_ = state
+}
+
+// G9: a pass that died after marking but before moving is finished by the
+// next one, and the archive is dated by that pass.
+func TestInterruptedArchiveIsCompleted(t *testing.T) {
+	_, root, s := setupGC(t)
+	mailboxRoot(t, root, "gone", "keep")
+	stale := filepath.Join(root, "agents", "gone", archiveMarker)
+	if err := os.WriteFile(stale, []byte(`{"handle":"gone","archived_unix":5}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := RunGC(context.Background(), fakeAmq(t), root, s, GCPlan{Archive: []string{"gone"}}, time.Unix(1790600000, 0)); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := s.Archives()
+	if len(got) != 1 || got[0].ArchivedUnix != 1790600000 {
+		t.Fatalf("archives %+v", got)
+	}
+}
+
+// G8: an archive dir that cannot be searched fails the pass at once
+// instead of looping on candidate names.
+func TestArchiveTargetErrorsAreReturned(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	state, root, s := setupGC(t)
+	mailboxRoot(t, root, "gone", "keep")
+	base := filepath.Join(state, "archive")
+	if err := os.MkdirAll(base, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(base, 0o200); err != nil { // write, no search
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(base, 0o755) })
+	done := make(chan error, 1)
+	go func() {
+		done <- RunGC(context.Background(), fakeAmq(t), root, s, GCPlan{Archive: []string{"gone"}}, time.Unix(1790600000, 0))
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("an unsearchable archive dir must be an error")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("gc looped on an archive target error")
+	}
+	if _, err := os.Stat(filepath.Join(root, "agents", "gone")); err != nil {
+		t.Fatal("mailbox moved despite the error")
+	}
+}
+
+// G7: stop died between the tombstone and the record; the same agent
+// resuming unnamed keeps its handle.
+func TestInheritedHandleWinsOverItsOwnTombstone(t *testing.T) {
+	rec := WakerRecord{PaneID: "w1:p1", Handle: "claude-7", Cwd: "/repo/a", Agent: "claude"}
+	a := AgentInfo{PaneID: "w1:p1", Agent: str("claude"), Cwd: "/repo/a"}
+	reserved := ReservedHandles([]Tombstone{{Handle: "claude-7"}}, []WakerRecord{rec}, "w1:p1")
+	if got := AdoptHandle(a, []AgentInfo{a}, rec, true, reserved); got != "claude-7" {
+		t.Fatalf("got %q", got)
+	}
+}

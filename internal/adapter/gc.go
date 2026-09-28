@@ -158,6 +158,56 @@ func (s *Store) archiveBase() (string, error) {
 	return base, nil
 }
 
+// archiveTarget is a free `<handle>-<unix>[.n]` name in archiveDir. Only an
+// existing name moves on to the next; any other error is returned.
+func archiveTarget(ctx context.Context, archiveDir, handle string, now time.Time) (string, error) {
+	for i := 1; i <= 100; i++ {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		name := fmt.Sprintf("%s-%d", handle, now.Unix())
+		if i > 1 {
+			name = fmt.Sprintf("%s.%d", name, i)
+		}
+		dst := filepath.Join(archiveDir, name)
+		_, err := os.Lstat(dst)
+		if errors.Is(err, os.ErrNotExist) {
+			return dst, nil
+		}
+		if err != nil {
+			return "", fmt.Errorf("gc: archive target %s: %w", dst, err)
+		}
+	}
+	return "", fmt.Errorf("gc: no free archive name for %s", handle)
+}
+
+// writeMark creates dir's marker exclusively, so it never writes through a
+// link: whatever already has that name is removed first (removing a link
+// removes the link, not its target).
+func writeMark(dir string, m archiveMark) error {
+	p := filepath.Join(dir, archiveMarker)
+	if _, err := os.Lstat(p); err == nil {
+		if err := os.Remove(p); err != nil {
+			return err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		return err
+	}
+	f, err := os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		return err
+	}
+	_, werr := f.Write(b)
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	return werr
+}
+
 func isRealDir(path string) bool {
 	st, err := os.Lstat(path)
 	return err == nil && st.IsDir()
@@ -202,22 +252,17 @@ func (s *Store) archiveMailbox(ctx context.Context, amqBin, root, handle string,
 		if err := os.MkdirAll(archiveDir, 0o755); err != nil {
 			return false, err
 		}
-		dst := filepath.Join(archiveDir, fmt.Sprintf("%s-%d", handle, now.Unix()))
-		for i := 2; ; i++ {
-			if _, err := os.Lstat(dst); errors.Is(err, os.ErrNotExist) {
-				break
-			}
-			dst = filepath.Join(archiveDir, fmt.Sprintf("%s-%d.%d", handle, now.Unix(), i))
+		// Mark, then move: whatever lands in the archive carries the marker,
+		// and a pass that died in between is redone by the next one.
+		if err := writeMark(src, archiveMark{Handle: handle, ArchivedUnix: now.Unix()}); err != nil {
+			return false, fmt.Errorf("gc: mark %s: %w", src, err)
 		}
-		if err := os.Rename(src, dst); err != nil {
-			return false, fmt.Errorf("gc: archive %s: %w", handle, err)
-		}
-		mark, err := json.Marshal(archiveMark{Handle: handle, ArchivedUnix: now.Unix()})
+		dst, err := archiveTarget(ctx, archiveDir, handle, now)
 		if err != nil {
 			return false, err
 		}
-		if err := os.WriteFile(filepath.Join(dst, archiveMarker), mark, 0o644); err != nil {
-			return false, fmt.Errorf("gc: mark archive %s: %w", dst, err)
+		if err := os.Rename(src, dst); err != nil {
+			return false, fmt.Errorf("gc: archive %s: %w", handle, err)
 		}
 	}
 	cfgPath := filepath.Join(root, "meta", "config.json")

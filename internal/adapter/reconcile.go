@@ -144,6 +144,11 @@ func AdoptHandle(a AgentInfo, live []AgentInfo, rec WakerRecord, exists bool, re
 		taken[rec.Handle] = true
 	}
 	for _, h := range reserved {
+		// The confirmed same occupant keeps its handle even when a stop that
+		// died halfway left a tombstone for it.
+		if inherited && h == prev.Handle {
+			continue
+		}
 		taken[h] = true
 	}
 	return ChooseHandle(a, taken, prev.Handle)
