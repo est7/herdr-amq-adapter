@@ -34,11 +34,38 @@ type WakerRecord struct {
 	Generation  string `json:"generation,omitempty"` // amq wake lock generation; empty while parked
 	PID         int    `json:"pid"`                  // informational; 0 while parked
 	Cwd         string `json:"cwd"`
+	// Agent is the Herdr agent kind (claude, codex, …) at adoption; empty
+	// on records written before it was kept.
+	Agent       string `json:"agent,omitempty"`
 	Root        string `json:"root"`
 	StartedUnix int64  `json:"started_unix"`
 	// PaneAliases are earlier pane ids of the same occupant (after moves);
 	// their identity files are kept alive until the agent goes away.
 	PaneAliases []string `json:"pane_aliases,omitempty"`
+}
+
+// SameOccupant reports whether the live agent can be the one this record
+// was written for. Pane ids restart from w1 after a Herdr server restart, so
+// the same id may name another pane: the working directory and agent kind
+// must match too (herdr-projects' identity rule). A move keeps both, and an
+// unnamed agent that matches is the same one resumed natively without its
+// name. A record that did not keep cwd or kind cannot tell and matches.
+func (w WakerRecord) SameOccupant(a AgentInfo) bool {
+	if w.Cwd != "" && a.Cwd != w.Cwd {
+		return false
+	}
+	return w.Agent == "" || a.Agent == nil || *a.Agent == "" || *a.Agent == w.Agent
+}
+
+// Inherit returns the record ensure may carry over (handle, argv pane,
+// aliases, start time) to the live agent, and whether there is one. A
+// record of an earlier occupant is not inherited: its handle would route
+// that agent's mail to the newcomer.
+func Inherit(rec WakerRecord, exists bool, live AgentInfo) (WakerRecord, bool) {
+	if !exists || !rec.SameOccupant(live) {
+		return WakerRecord{}, false
+	}
+	return rec, true
 }
 
 // ArgvPane is the pane id the waker's injector argv names.
@@ -56,8 +83,8 @@ type ReconcilePlan struct {
 }
 
 // Plan diffs live agents against recorded wakers. Every live agent is
-// wanted; a pane whose record is current (handle matches the live name and
-// amq reports a live waker with the wanted target) is left alone, any other
+// wanted; a pane whose record is current (same occupant, handle matches the
+// live name and amq reports a live waker with the wanted target) is left alone, any other
 // live pane goes to Start, where ensure decides what to replace and keeps
 // the pane's previous handle. Only a record whose pane no longer hosts an
 // agent is retired outright.
@@ -79,7 +106,7 @@ func Plan(live []AgentInfo, wakers []WakerRecord, current func(WakerRecord) bool
 		// generations were recorded) cannot prove ownership and is not
 		// advertised to peers; ensure refreshes it even when the waker is
 		// current.
-		if (!named || name == w.Handle) && w.Generation != "" && current(w) {
+		if (!named || name == w.Handle) && w.SameOccupant(a) && w.Generation != "" && current(w) {
 			covered[w.PaneID] = true
 		}
 	}
@@ -102,4 +129,18 @@ func LiveHandles(recs []WakerRecord) []string {
 		}
 	}
 	return out
+}
+
+// AdoptHandle is the handle an unnamed agent in a pane is given: the
+// record's when it is the same occupant (Inherit), otherwise a kind-based
+// name. An earlier occupant's handle is never offered to a newcomer, even
+// when kind-based naming would land on it: its mailbox holds mail for that
+// agent.
+func AdoptHandle(a AgentInfo, live []AgentInfo, rec WakerRecord, exists bool) string {
+	prev, inherited := Inherit(rec, exists, a)
+	taken := TakenNames(live)
+	if exists && !inherited {
+		taken[rec.Handle] = true
+	}
+	return ChooseHandle(a, taken, prev.Handle)
 }

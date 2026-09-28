@@ -270,31 +270,31 @@ func ensure(e env, paneID string) error {
 	if err != nil {
 		return err
 	}
+	prev, inherited := adapter.Inherit(rec, exists, info)
+	if exists && !inherited {
+		fmt.Printf("pane %s: record for %s (cwd %s, kind %s) is an earlier occupant's; adopting afresh\n", paneID, rec.Handle, rec.Cwd, rec.Agent)
+	}
 	handle, named := adapter.Handle(info)
 	if !named {
 		live, err := e.herdr.AgentList(ctx)
 		if err != nil {
 			return err
 		}
-		preferred := ""
-		if exists {
-			preferred = rec.Handle
-		}
-		handle = adapter.ChooseHandle(info, adapter.TakenNames(live), preferred)
+		handle = adapter.AdoptHandle(info, live, rec, exists)
 		if err := e.herdr.AgentRename(ctx, paneID, handle); err != nil {
 			return err
 		}
 		fmt.Printf("named pane %s agent %q\n", paneID, handle)
 	}
 	argvPane := paneID
-	if exists {
-		argvPane = rec.ArgvPane()
-		// A renamed occupant leaves its previous handle's waker behind;
-		// retire that one first, by the generation this record owns.
-		if rec.Handle != handle {
-			if err := retireRecorded(ctx, e, rec); err != nil {
-				return err
-			}
+	if inherited {
+		argvPane = prev.ArgvPane()
+	}
+	// A renamed or replaced occupant leaves the previous handle's waker
+	// behind; retire that one first, by the generation this record owns.
+	if exists && rec.Handle != handle {
+		if err := retireRecorded(ctx, e, rec); err != nil {
+			return err
 		}
 	}
 	if err := adapter.EnsureMailbox(ctx, e.amq, e.root, handle); err != nil {
@@ -302,7 +302,7 @@ func ensure(e env, paneID string) error {
 	}
 	// The occupant may still see an earlier pane id (aliases after a move),
 	// so every identity file it could source must carry the current handle.
-	for _, pane := range append([]string{paneID}, rec.PaneAliases...) {
+	for _, pane := range append([]string{paneID}, prev.PaneAliases...) {
 		if err := adapter.WriteIdentity(e.configDir, adapter.Identity{PaneID: pane, Handle: handle, Root: e.root}); err != nil {
 			return err
 		}
@@ -339,7 +339,7 @@ func ensure(e env, paneID string) error {
 	fresh := adapter.WakerRecord{
 		ServerSocket: os.Getenv("HERDR_SOCKET_PATH"),
 		PaneID:       paneID, Handle: handle, SpawnPaneID: argvPane, Generation: st.Generation, PID: st.PID,
-		Cwd: info.Cwd, Root: e.root, StartedUnix: rec.StartedUnix, PaneAliases: rec.PaneAliases,
+		Cwd: info.Cwd, Agent: agentKind(info), Root: e.root, StartedUnix: prev.StartedUnix, PaneAliases: prev.PaneAliases,
 	}
 	if decision != adapter.DecisionKeep || fresh.StartedUnix == 0 {
 		fresh.StartedUnix = time.Now().Unix()
@@ -350,6 +350,13 @@ func ensure(e env, paneID string) error {
 	fmt.Printf("%s pane=%s handle=%s waker pid=%d gen=%s identity=%s\n",
 		decision, paneID, handle, st.PID, st.Generation, adapter.IdentityPath(e.configDir, paneID))
 	return nil
+}
+
+func agentKind(a adapter.AgentInfo) string {
+	if a.Agent == nil {
+		return ""
+	}
+	return *a.Agent
 }
 
 // retireRecorded stops the waker this record owns and nothing else. A

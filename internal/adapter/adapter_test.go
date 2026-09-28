@@ -218,3 +218,76 @@ func TestPlanRefreshesRecordsWithoutGeneration(t *testing.T) {
 		t.Fatalf("plan %+v", plan)
 	}
 }
+
+// Pane ids restart from w1 after a Herdr server restart, so a record's pane
+// id may name another pane. A record is only the live agent's when the
+// working directory and agent kind match too; an unnamed match is the same
+// agent resumed natively without its name.
+func TestInheritOnlyFromTheSameOccupant(t *testing.T) {
+	rec := WakerRecord{PaneID: "w1:p1", Handle: "reviewer", SpawnPaneID: "w9:p9", Cwd: "/repo/a", Agent: "claude",
+		PaneAliases: []string{"w9:p9"}, StartedUnix: 42, Generation: "g"}
+	for name, tc := range map[string]struct {
+		rec    WakerRecord
+		exists bool
+		live   AgentInfo
+		want   bool
+	}{
+		"moved or resumed, unnamed": {rec, true, AgentInfo{PaneID: "w1:p1", Agent: str("claude"), Cwd: "/repo/a"}, true},
+		"same, named":               {rec, true, AgentInfo{PaneID: "w1:p1", Name: str("reviewer"), Agent: str("claude"), Cwd: "/repo/a"}, true},
+		"other cwd after restart":   {rec, true, AgentInfo{PaneID: "w1:p1", Agent: str("claude"), Cwd: "/repo/b"}, false},
+		"other kind after restart":  {rec, true, AgentInfo{PaneID: "w1:p1", Agent: str("codex"), Cwd: "/repo/a"}, false},
+		// Records written before cwd or kind was kept cannot tell; they
+		// keep today's behaviour instead of dropping every handle at once.
+		"legacy record": {WakerRecord{PaneID: "w1:p1", Handle: "reviewer"}, true, AgentInfo{PaneID: "w1:p1", Agent: str("codex"), Cwd: "/repo/b"}, true},
+		"no record":     {WakerRecord{}, false, AgentInfo{PaneID: "w1:p1", Agent: str("claude"), Cwd: "/repo/a"}, false},
+	} {
+		got, ok := Inherit(tc.rec, tc.exists, tc.live)
+		if ok != tc.want {
+			t.Errorf("%s: inherit = %v, want %v", name, ok, tc.want)
+			continue
+		}
+		if !ok && !reflect.DeepEqual(got, WakerRecord{}) {
+			t.Errorf("%s: a record not inherited must carry nothing over, got %+v", name, got)
+		}
+		if ok && got.Handle != tc.rec.Handle {
+			t.Errorf("%s: inherited handle %q", name, got.Handle)
+		}
+	}
+}
+
+// A current waker whose record belongs to an earlier occupant of the pane id
+// does not cover the new agent: it goes through ensure and is adopted afresh.
+func TestPlanDoesNotCoverAnotherOccupant(t *testing.T) {
+	live := []AgentInfo{
+		{PaneID: "w1:p1", Agent: str("codex"), Cwd: "/repo/b"},  // new agent reusing the id
+		{PaneID: "w1:p2", Agent: str("claude"), Cwd: "/repo/a"}, // resumed unnamed: covered
+	}
+	wakers := []WakerRecord{
+		{PaneID: "w1:p1", Handle: "reviewer", Cwd: "/repo/a", Agent: "claude", PID: 1, Generation: "g"},
+		{PaneID: "w1:p2", Handle: "impl", Cwd: "/repo/a", Agent: "claude", PID: 2, Generation: "g"},
+	}
+	plan := Plan(live, wakers, func(WakerRecord) bool { return true })
+	if len(plan.Start) != 1 || plan.Start[0].PaneID != "w1:p1" || len(plan.Stop) != 0 {
+		t.Fatalf("plan %+v", plan)
+	}
+}
+
+// An unnamed newcomer in a reused pane id never gets the earlier
+// occupant's handle, even when kind-based naming would pick that same name:
+// that mailbox holds the earlier agent's mail.
+func TestAdoptHandleNeverHandsOverAnEarlierOccupantsHandle(t *testing.T) {
+	rec := WakerRecord{PaneID: "w1:p1", Handle: "claude", Cwd: "/repo/a", Agent: "claude"}
+	newcomer := AgentInfo{PaneID: "w1:p1", Agent: str("claude"), Cwd: "/repo/b"}
+	if got := AdoptHandle(newcomer, []AgentInfo{newcomer}, rec, true); got == "claude" {
+		t.Fatalf("newcomer took the earlier occupant's handle %q", got)
+	}
+	// The same agent resumed without its name keeps its handle.
+	resumed := AgentInfo{PaneID: "w1:p1", Agent: str("claude"), Cwd: "/repo/a"}
+	if got := AdoptHandle(resumed, []AgentInfo{resumed}, WakerRecord{PaneID: "w1:p1", Handle: "claude-7", Cwd: "/repo/a", Agent: "claude"}, true); got != "claude-7" {
+		t.Fatalf("resumed agent got %q", got)
+	}
+	// No record: plain kind-based naming.
+	if got := AdoptHandle(newcomer, []AgentInfo{newcomer}, WakerRecord{}, false); got != "claude" {
+		t.Fatalf("fresh agent got %q", got)
+	}
+}
