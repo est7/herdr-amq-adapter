@@ -333,7 +333,8 @@ type Ownership int
 const (
 	// OwnsNothing: no lock, or the record is parked (owns no generation).
 	OwnsNothing Ownership = iota
-	// OwnsLock: the live lock carries the record's generation and target.
+	// OwnsLock: the live lock carries the record's generation and target
+	// (the injector path aside, which changes when the plugin moves).
 	OwnsLock
 	// ForeignLock: a positively different generation; someone else's waker
 	// (the handle was reused after a delayed release). Leave it alone.
@@ -342,8 +343,8 @@ const (
 
 // DecideOwnership classifies the observed lock against the record. An
 // observation that cannot identify the lock (no generation, no saved
-// target, or a target that disagrees with the generation's record) is an
-// error: cleanup must fail closed rather than abandon a possibly live
+// target, or a target whose pane, handle, root or retry mode disagrees with
+// the generation's record) is an error: cleanup must fail closed rather than abandon a possibly live
 // waker and discard the only credential that could retire it.
 func DecideOwnership(st WakeState, rec WakerRecord, want WakeTarget) (Ownership, error) {
 	if rec.Generation == "" || st.Status == "missing" {
@@ -355,7 +356,13 @@ func DecideOwnership(st WakeState, rec WakerRecord, want WakeTarget) (Ownership,
 	if st.Generation != rec.Generation {
 		return ForeignLock, nil
 	}
-	if !st.Target.Equal(want) {
+	// Only the injector path may differ: the plugin moved (a linked checkout
+	// became a managed install, or the checkout moved). The generation
+	// proves the record spawned this waker, and retire fences on it and
+	// the lock's own saved target.
+	moved := want
+	moved.InjectVia = st.Target.InjectVia
+	if !st.Target.Equal(moved) {
 		return OwnsNothing, fmt.Errorf("wake lock for %s has this record's generation %s but a different target; refusing to guess", rec.Handle, rec.Generation)
 	}
 	return OwnsLock, nil

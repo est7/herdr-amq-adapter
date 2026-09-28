@@ -121,7 +121,12 @@ func TestDecideOwnership(t *testing.T) {
 		{"foreign generation", WakeState{Status: "valid", Generation: "g2", HasTarget: true, Target: want}, rec, ForeignLock, false},
 		{"no generation", WakeState{Status: "valid", HasTarget: true, Target: want}, rec, OwnsNothing, true},
 		{"no target", WakeState{Status: "valid", Generation: "g1"}, rec, OwnsNothing, true},
-		{"same generation other target", WakeState{Status: "valid", Generation: "g1", HasTarget: true, Target: ExpectedTarget("/b", "bob", "w1:p1", "/r")}, rec, OwnsNothing, true},
+		// The plugin moved (linked checkout -> managed install, a moved
+		// checkout): only the injector path differs, the generation proves
+		// the record spawned it, and retire fences on that generation.
+		{"same generation, plugin moved", WakeState{Status: "valid", Generation: "g1", HasTarget: true, Target: ExpectedTarget("/b", "bob", "w1:p1", "/r")}, rec, OwnsLock, false},
+		{"same generation, other pane", WakeState{Status: "valid", Generation: "g1", HasTarget: true, Target: ExpectedTarget("/a", "bob", "w9:p9", "/r")}, rec, OwnsNothing, true},
+		{"same generation, other root", WakeState{Status: "valid", Generation: "g1", HasTarget: true, Target: ExpectedTarget("/a", "bob", "w1:p1", "/other")}, rec, OwnsNothing, true},
 	}
 	for _, c := range cases {
 		got, err := DecideOwnership(c.st, c.rec, want)
