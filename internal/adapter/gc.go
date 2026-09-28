@@ -182,16 +182,28 @@ func archiveTarget(ctx context.Context, archiveDir, handle string, now time.Time
 }
 
 // writeMark creates dir's marker exclusively, so it never writes through a
-// link: whatever already has that name is removed first (removing a link
-// removes the link, not its target).
+// link. An existing entry under that name is replaced only when it is a
+// link (removing a link removes the link, not its target) or this
+// adapter's marker for the same handle (an interrupted earlier pass);
+// anything else is kept and the archive fails.
 func writeMark(dir string, m archiveMark) error {
 	p := filepath.Join(dir, archiveMarker)
-	if _, err := os.Lstat(p); err == nil {
+	st, err := os.Lstat(p)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+	case err != nil:
+		return err
+	case st.Mode()&os.ModeSymlink != 0:
 		if err := os.Remove(p); err != nil {
 			return err
 		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
+	default:
+		if old := readMark(dir); old == nil || old.Handle != m.Handle {
+			return fmt.Errorf("%s exists and is not this adapter's marker for %s; leaving it", p, m.Handle)
+		}
+		if err := os.Remove(p); err != nil {
+			return err
+		}
 	}
 	b, err := json.Marshal(m)
 	if err != nil {
@@ -322,11 +334,26 @@ func (s *Store) PutTombstone(t Tombstone) error {
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
-	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+	// A fresh, exclusively created temp file: nothing already in the dir is
+	// ever written through.
+	f, err := os.CreateTemp(filepath.Dir(p), ".tombstone-*")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, p)
+	_, werr := f.Write(b)
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr == nil {
+		werr = os.Chmod(f.Name(), 0o644)
+	}
+	if werr == nil {
+		werr = os.Rename(f.Name(), p)
+	}
+	if werr != nil {
+		_ = os.Remove(f.Name())
+	}
+	return werr
 }
 
 func (s *Store) DeleteTombstone(handle string) error {
@@ -353,13 +380,22 @@ func (s *Store) Tombstones() ([]Tombstone, error) {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
 			continue
 		}
-		b, err := os.ReadFile(filepath.Join(s.tombstoneDir(), e.Name()))
+		// A tombstone leads to archiving a mailbox, so it must be exactly
+		// what PutTombstone writes: a regular file named after its handle.
+		p := filepath.Join(s.tombstoneDir(), e.Name())
+		if st, err := os.Lstat(p); err != nil || !st.Mode().IsRegular() {
+			return nil, fmt.Errorf("tombstone %s is not a regular file", p)
+		}
+		b, err := os.ReadFile(p)
 		if err != nil {
 			return nil, err
 		}
 		var t Tombstone
 		if err := json.Unmarshal(b, &t); err != nil {
 			return nil, fmt.Errorf("corrupt tombstone %s: %w", e.Name(), err)
+		}
+		if e.Name() != t.Handle+".json" || !herdrNameRe.MatchString(t.Handle) {
+			return nil, fmt.Errorf("tombstone %s names handle %q", p, t.Handle)
 		}
 		out = append(out, t)
 	}

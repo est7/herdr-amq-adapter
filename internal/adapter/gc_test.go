@@ -359,3 +359,70 @@ func TestInheritedHandleWinsOverItsOwnTombstone(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+// G10: a link planted at a temp-file name is never written through.
+func TestPutTombstoneNeverWritesThroughALink(t *testing.T) {
+	state, _, s := setupGC(t)
+	victim := filepath.Join(t.TempDir(), "user-file")
+	if err := os.WriteFile(victim, []byte("precious"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(state, "tombstones")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, filepath.Join(dir, "claude.json.tmp")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PutTombstone(Tombstone{Handle: "claude", DepartedUnix: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(victim); string(b) != "precious" {
+		t.Fatalf("overwritten: %q", b)
+	}
+}
+
+// G11: a tombstone counts only as a regular file named after its handle.
+func TestTombstonesFailClosedOnMismatch(t *testing.T) {
+	state, _, s := setupGC(t)
+	dir := filepath.Join(state, "tombstones")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "a.json"), []byte(`{"handle":"b","departed_unix":1}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.Tombstones(); err == nil {
+		t.Fatalf("mismatched tombstone accepted: %+v", got)
+	}
+	if err := os.Remove(filepath.Join(dir, "a.json")); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "x.json")
+	if err := os.WriteFile(target, []byte(`{"handle":"c","departed_unix":1}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(dir, "c.json")); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.Tombstones(); err == nil {
+		t.Fatalf("linked tombstone accepted: %+v", got)
+	}
+}
+
+// G12: an existing file under the marker name that is not this adapter's
+// marker for the same handle is kept, and archiving that mailbox fails.
+func TestForeignFileUnderTheMarkerNameIsKept(t *testing.T) {
+	_, root, s := setupGC(t)
+	mailboxRoot(t, root, "gone", "keep")
+	foreign := filepath.Join(root, "agents", "gone", archiveMarker)
+	if err := os.WriteFile(foreign, []byte("user notes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := RunGC(context.Background(), fakeAmq(t), root, s, GCPlan{Archive: []string{"gone"}}, time.Unix(1790600000, 0)); err == nil {
+		t.Fatal("archiving over a foreign file must fail")
+	}
+	if b, _ := os.ReadFile(foreign); string(b) != "user notes" {
+		t.Fatalf("foreign file changed: %q", b)
+	}
+}
