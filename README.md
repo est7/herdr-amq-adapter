@@ -16,50 +16,83 @@ agent A pane ──amq send --to claude──▶ shared AMQ root ──▶ amq w
                      act on it (you are claude in Herdr; first: source <identity>)"
 ```
 
-## Install
+## Install and use
+
+Three commands, on every machine that runs Herdr (macOS or Linux, Herdr 0.9.1+).
+No Go and no AMQ setup needed.
 
 ```bash
-herdr plugin install est7/herdr-amq-adapter        # runs `go build` on install
-# or, for development:
-herdr plugin link "$PWD"                            # uses bin/ in this checkout; build it first
-go build -o bin/herdr-amq-adapter ./cmd/herdr-amq-adapter
+# 1. Install. Downloads this machine's prebuilt binary from the release
+#    (checked against its SHA256SUMS), and installs amq and amq-bridge into
+#    ~/.local/bin when amq is missing.
+herdr plugin install est7/herdr-amq-adapter
+
+# 2. Set up, once. Links `herdr-amq-adapter` into ~/.local/bin and the agent
+#    skill into ~/.claude/skills (and ~/.codex/skills when Codex is
+#    installed), then adopts the agents already open in panes.
+herdr plugin action invoke est7.amq-adapter.configure
+
+# 3. Use it. Every agent in a Herdr pane now has a mailbox under its Herdr
+#    name. Ask one agent to message another, e.g. in claude's pane:
+#      "ask codex to review the current diff over AMQ"
 ```
 
-Requirements:
+The agent's skill does the rest (`amq send`, a doorbell in the other pane,
+`amq drain`, `amq reply`). Open the status popup to watch delivery:
 
-| what | version | why |
+```bash
+herdr plugin action invoke est7.amq-adapter.dashboard
+```
+
+**Update** to the newest release (reinstalls through Herdr, then re-adopts
+agents with the new binary):
+
+```bash
+herdr-amq-adapter update           # or: update --check to only compare versions
+```
+
+**Another machine**: install and configure there the same way, then pair
+from this one with `herdr-amq-adapter peer add --ssh <host alias>` (see
+[Agents on other machines](#agents-on-other-machines)).
+
+**Skills manager**: this repo also has the standard
+`skills/<name>/SKILL.md` layout. `configure` leaves a skill of the same name
+that is already there untouched.
+
+Requirements, all installed or checked by step 1:
+
+| what | version | notes |
 |---|---|---|
 | Herdr | ≥ 0.9.1 | plugin events, `agent prompt`, status popup |
-| Go | 1.27 (`go.mod`) | the `[[build]]` step |
-| `amq` | ≥ 0.80.1 (tested), on the PATH Herdr's server sees or `AMQ_BIN` | wakers, `wake check/retire/repair` |
-| `amq-bridge` | same release as `amq`, from the release tarball (not in Homebrew) into `~/.local/bin`, or `AMQ_BRIDGE_BIN` | cross-machine only |
+| `amq` | 0.81.1 tested | installed into `~/.local/bin` when missing; an older one gets a warning (upgrade it, then run the reconcile action) |
+| `amq-bridge` | same release as `amq` | installed with it; only used across machines |
+| `curl` or `wget`, `shasum` or `sha256sum` | any | to download and check the binaries |
 
-The plugin binary lives inside the plugin root (`bin/herdr-amq-adapter`;
-`herdr plugin list --json` prints `plugin_root`). Hooks and actions run it
-from there; for the CLI-only commands (`peer add`, `bridge status --json`,
-`version`) call it by that path or symlink it into `~/.local/bin`.
+Actions (`herdr plugin action invoke est7.amq-adapter.<id>`): `configure`,
+`reconcile`, `status`, `bridge-status`, `bridge-ensure`, `dashboard`.
+`herdr-amq-adapter version` prints the release version (a source build
+prints the VCS revision, with `-modified` when dirty).
 
-**After installing or linking, run the reconcile action once:**
-
-```bash
-herdr plugin action invoke est7.amq-adapter.reconcile
-```
-
-Herdr runs `[[startup]]` at session restore and handoff, not when a plugin
-is linked or enabled, so agents already open in panes are adopted only by
-that first reconcile (later ones happen on every `pane.agent_detected`).
-
-Then give your agents the companion skill. This repo is a skill source with
-the standard `skills/<name>/SKILL.md` layout, so any skills manager that
-reads that layout can install it; the manual form is:
+### Development
 
 ```bash
-ln -s "<plugin_root>/skills/herdr-amq-adapter" ~/.claude/skills/herdr-amq-adapter   # Claude Code
+herdr plugin link "$PWD"            # runs nothing: build first
+sh scripts/install.sh               # with Go: builds bin/ from this checkout
+herdr plugin action invoke est7.amq-adapter.configure
 ```
 
-Actions (`herdr plugin action invoke est7.amq-adapter.<id>`): `reconcile`,
-`status`, `bridge-status`, `bridge-ensure`, `dashboard`. `herdr-amq-adapter version`
-prints the build (VCS revision, `-modified` when dirty).
+`scripts/install.sh` builds from source in any checkout that is not a
+release commit (or with `HERDR_AMQ_ADAPTER_BUILD=source`). Hooks and waker
+injections run `bin/herdr-amq-adapter` from the plugin root, so a rebuild
+there is live at the next event.
+
+### Releasing
+
+Bump `version` in `herdr-plugin.toml`, commit, tag `v<version>` and publish
+the release: `gh release create v<version> --verify-tag --generate-notes`.
+`.github/workflows/release.yml` checks the tag against the manifest, runs the
+tests, and attaches `herdr-amq-adapter_{darwin,linux}_{arm64,amd64}` and
+`SHA256SUMS`, which `scripts/install.sh` downloads.
 
 ## What it does, zero-config
 

@@ -1,0 +1,57 @@
+# Attaches prebuilt binaries and SHA256SUMS to a GitHub release.
+#
+# Runs when a release is published (`gh release create vX.Y.Z --verify-tag`),
+# or by hand with a tag to rebuild an existing release's assets.
+# scripts/install.sh downloads these; a missing asset fails the run.
+name: Release binaries
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag, e.g. v0.3.0
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ github.event.release.tag_name || inputs.tag }}
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: refs/tags/${{ env.TAG }}
+
+      - name: Check the tag matches herdr-plugin.toml
+        run: |
+          grep -qx "version = \"${TAG#v}\"" herdr-plugin.toml || { echo "::error::herdr-plugin.toml version is not ${TAG#v}"; exit 1; }
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Test
+        run: go test ./...
+
+      - name: Build
+        run: |
+          mkdir dist
+          for target in darwin/arm64 darwin/amd64 linux/arm64 linux/amd64; do
+            os=${target%/*} arch=${target#*/}
+            CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -trimpath \
+              -ldflags "-s -w -X main.version=${TAG#v}" \
+              -o "dist/herdr-amq-adapter_${os}_${arch}" ./cmd/herdr-amq-adapter
+          done
+          test "$(dist/herdr-amq-adapter_linux_amd64 version)" = "${TAG#v}"
+          (cd dist && sha256sum herdr-amq-adapter_* > SHA256SUMS && cat SHA256SUMS)
+
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"

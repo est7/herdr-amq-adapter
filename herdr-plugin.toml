@@ -1,12 +1,15 @@
 id = "est7.amq-adapter"
 name = "AMQ Adapter"
-version = "0.2.0"
+version = "0.3.0"
 min_herdr_version = "0.9.1"
 description = "Agents in Herdr panes message each other over AMQ with zero config: auto-named handles, one shared root, delivery via `herdr agent prompt`."
 platforms = ["linux", "macos"]
 
+# Downloads the release binary for this machine (verified against the
+# release's SHA256SUMS) and installs amq and amq-bridge when missing;
+# a development checkout with Go builds from source instead.
 [[build]]
-command = ["go", "build", "-o", "bin/herdr-amq-adapter", "./cmd/herdr-amq-adapter"]
+command = ["sh", "scripts/install.sh"]
 
 # Startup: reconcile waker inventory against live named agents.
 [[startup]]
@@ -27,6 +30,11 @@ command = ["bin/herdr-amq-adapter", "hook"]
 [[events]]
 on = "pane.moved"
 command = ["bin/herdr-amq-adapter", "hook"]
+
+[[actions]]
+id = "configure"
+title = "AMQ: set up (link the command and skill, adopt open agents)"
+command = ["bin/herdr-amq-adapter", "configure"]
 
 [[actions]]
 id = "reconcile"

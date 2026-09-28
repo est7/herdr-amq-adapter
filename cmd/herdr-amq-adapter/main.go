@@ -1,5 +1,7 @@
 // herdr-amq-adapter is a Herdr plugin binary with these primary entry points:
 //
+//	configure  — once after install: link the command and skill, adopt agents
+//	update     — reinstall the newest release through Herdr
 //	hook       — [[events]] handler: adopt/retire the event's pane
 //	reconcile  — [[startup]] / action: diff live agents vs recorded wakers
 //	inject     — amq --inject-via target: `herdr agent prompt`, screen checked first
@@ -98,6 +100,10 @@ func main() {
 		err = runBridge(os.Args[2:])
 	case "peer":
 		err = runPeer(os.Args[2:])
+	case "configure":
+		err = runConfigure()
+	case "update":
+		err = runUpdate(os.Args[2:])
 	case "version":
 		fmt.Println(version)
 	default:
@@ -111,7 +117,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: herdr-amq-adapter hook|reconcile|status|status-popup [--once]|dashboard|version|inject <pane_id> <handle> <root> <payload>|rendezvous --listen <addr> --dir <dir>|bridge run|ensure|status [--json]|peer add|accept|agents|aliases")
+	fmt.Fprintln(os.Stderr, "usage: herdr-amq-adapter configure|update [--check]|hook|reconcile|status|status-popup [--once]|dashboard|version|inject <pane_id> <handle> <root> <payload>|rendezvous --listen <addr> --dir <dir>|bridge run|ensure|status [--json]|peer add|accept|agents|aliases")
 }
 
 type env struct {
