@@ -40,7 +40,7 @@ func TestDecide(t *testing.T) {
 	}
 }
 
-func TestClassifyPromptResult(t *testing.T) {
+func TestClassifyHerdrResult(t *testing.T) {
 	cases := []struct {
 		rc     int
 		stderr string
@@ -52,11 +52,13 @@ func TestClassifyPromptResult(t *testing.T) {
 		// deferred MUST exit non-zero: amq treats deferred+exit0 as uncertain (terminal).
 		{1, `{"error":{"code":"agent_blocked","message":"agent is blocked"},"id":"cli:agent:prompt"}`, ProgressDeferred, "agent_blocked", 1},
 		{1, `{"error":{"code":"agent_not_found","message":"agent target w1:p9 not found"},"id":"cli:agent:prompt"}`, ProgressFailed, "agent_not_found", 1},
+		// The server is down (restarting): nothing was typed, retry later.
+		{1, `{"id":"cli:agent:prompt","error":{"code":"server_not_running","message":"no herdr server is running at /x.sock"}}`, ProgressDeferred, "server_not_running", 1},
 		{1, `{"error":{"code":"agent_prompt_stalled","message":"no activity"},"id":"x"}`, ProgressFailed, "agent_prompt_stalled", 1},
 		{2, "unknown option: --bogus", ProgressFailed, "exit_2", 1},
 	}
 	for _, c := range cases {
-		got := ClassifyPromptResult(c.rc, c.stderr)
+		got := ClassifyHerdrResult(c.rc, c.stderr)
 		if got.Progress != c.want || got.Code != c.code || got.ExitCode() != c.exit {
 			t.Errorf("rc=%d stderr=%q: got %+v want progress=%s code=%s exit=%d", c.rc, c.stderr, got, c.want, c.code, c.exit)
 		}

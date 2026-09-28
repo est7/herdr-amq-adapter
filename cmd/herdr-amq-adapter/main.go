@@ -2,7 +2,7 @@
 //
 //	hook       — [[events]] handler: adopt/retire the event's pane
 //	reconcile  — [[startup]] / action: diff live agents vs recorded wakers
-//	inject     — amq --inject-via target: `herdr agent prompt`
+//	inject     — amq --inject-via target: `herdr agent prompt`, screen checked first
 //	status     — action: print the waker inventory
 //	rendezvous — serve the amq-bridge courier blob store on loopback
 //
@@ -556,7 +556,7 @@ func runInject(args []string) int {
 	text := adapter.Notice(payload, id, adapter.IdentityPath(configDir, paneID))
 	// Target the agent by its live name, not the pane: the name follows the
 	// occupant across `herdr pane move`, the pane id does not.
-	out, _ := adapter.HerdrFromEnv().Prompt(handle, text, promptTimeout)
+	out, _ := adapter.HerdrFromEnv().Deliver(handle, text, promptTimeout)
 	fmt.Fprintf(os.Stderr, "AMQ_INJECT_PROGRESS=%s\n", out.Progress)
 	if out.Code != "" {
 		fmt.Fprintf(os.Stderr, "herdr-amq-adapter: inject pane=%s %s %s\n", paneID, out.Code, out.Note)

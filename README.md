@@ -66,7 +66,7 @@ prints the build (VCS revision, `-modified` when dirty).
 | moment | plugin action |
 |---|---|
 | Herdr detects an agent in a pane | if unnamed, `herdr agent rename` it `<kind>` or `<kind>-N` (claude, codex-2 …); provision its mailbox in the shared root (`amq init --force` with the merged agent list); write the pane's identity file; spawn a detached `amq wake` for it |
-| mail arrives for that handle | `amq wake` calls `inject`, which submits directly with `herdr agent prompt`; Herdr rejects `blocked` before input, and the adapter classifies `agent_blocked` as deferred |
+| mail arrives for that handle | `amq wake` calls `inject`, which reads the agent's screen and then submits with `herdr agent prompt`; an unsent draft, a trust dialog, or Herdr's `agent_blocked` defers delivery |
 | `herdr pane move` gives the pane a new id | re-key the record, write an identity file for the new id, keep the old one (the moved process still sees its original `HERDR_PANE_ID`); the waker is untouched because delivery targets the agent **name**, which Herdr carries across moves |
 | agent released, pane stays open | retire the waker; keep the record (pid 0) and identity file so the next agent detected in this pane is offered the same handle (Herdr drops the live name on release) |
 | pane closed or exited | retire the waker, remove identity files (current id and aliases) and the record |
@@ -116,11 +116,21 @@ notification and reads `AMQ_INJECT_PROGRESS=<marker>` from stderr. The
 prompt targets `<handle>` (the Herdr live name); `<pane>` only selects the
 identity file mentioned in the notice.
 
+Before typing, `inject` runs `herdr agent get` (the agent kind) and
+`herdr agent read --source visible --format ansi`, and checks the screen
+(`internal/screen`, ported from herdr-projects): `herdr agent prompt`
+merges its text with an unsent draft in the input box and submits both,
+and Enter on a trust dialog accepts it for every later session in that
+folder. Kinds whose input box the check cannot place (anything but claude,
+codex, cursor, gemini, opencode, pi) are sent to without it.
+
 | observed | marker | exit | meaning |
 |---|---|---|---|
 | prompt exit 0 | `accepted` | 0 | text + Enter written; cohort acknowledged (`--retry-until injected`). A working agent queues the notice into its turn |
-| prompt returns `agent_blocked` | `deferred` | 1 | approval / question UI; amq retries on its ladder (5s base, 2m cap, no budget spent) |
-| `agent_not_found`, `agent_prompt_stalled`, timeout, usage | `failed` | 1 | terminal for this cohort; a new inbox change re-arms |
+| input box holds unsent text (`draft_in_box`) | `deferred` | 1 | someone is typing in that pane; retried once the box is empty |
+| trust dialog on screen (`trust_screen`) | `deferred` | 1 | waits for the user to answer it in the pane |
+| `agent_blocked`, `server_not_running`, screen unreadable, timeout before the prompt | `deferred` | 1 | nothing was typed; amq retries on its ladder (5s base, 2m cap, no budget spent) |
+| `agent_not_found`, `agent_prompt_stalled`, timeout during the prompt, usage | `failed` | 1 | terminal for this cohort (a timed-out prompt may have typed); a new inbox change re-arms |
 
 `deferred` must exit non-zero: amq's `classifyInjectViaResult` treats a
 deferred marker with exit 0 as `uncertain`, which is terminal and never
@@ -234,6 +244,10 @@ read failed. Full per-message end-to-end doctor tracing is not implemented.
 
 - Herdr's prompt success proves terminal submission, not agent consumption.
   The popup does not claim a drained receipt from a successful injection.
+- The screen check reads only the visible screen. For a harness whose input
+  box it cannot place, a trust-dialog phrase quoted in visible output defers
+  delivery for as long as it stays on screen, which for an idle agent can be
+  indefinitely (retried on amq's ladder, not lost; new output clears it).
 - One shared root per user, not per project; handles are global across
   Herdr workspaces.
 - Unix only (`setsid`).

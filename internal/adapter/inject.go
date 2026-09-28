@@ -3,6 +3,8 @@ package adapter
 import (
 	"encoding/json"
 	"strings"
+
+	"github.com/est7/herdr-amq-adapter/internal/screen"
 )
 
 // Progress is the amq --inject-via acknowledgement protocol, emitted on
@@ -18,7 +20,7 @@ const (
 	ProgressFailed Progress = "failed"
 )
 
-// Outcome is the classified result of one `herdr agent prompt` run.
+// Outcome is the classified result of one delivery attempt.
 type Outcome struct {
 	Progress Progress
 	Code     string // herdr error code when present
@@ -44,25 +46,41 @@ type herdrError struct {
 	} `json:"error"`
 }
 
-// ClassifyPromptResult maps a `herdr agent prompt` exit status and stderr to
-// the amq progress protocol.
+// ClassifyHerdrResult maps a herdr exit status and stderr to the amq
+// progress protocol. Codes that guarantee nothing was typed defer; any
+// other failure is terminal for this cohort.
 //
-//	rc 0                      -> accepted
-//	agent_blocked             -> deferred (approval/question UI; retry when free)
-//	anything else             -> failed   (not found, stalled, usage error, timeout)
-func ClassifyPromptResult(exitCode int, stderr string) Outcome {
+//	rc 0                                  -> accepted
+//	agent_blocked, server_not_running     -> deferred (approval UI; server restarting)
+//	anything else                         -> failed   (not found, stalled, usage error)
+func ClassifyHerdrResult(exitCode int, stderr string) Outcome {
 	if exitCode == 0 {
 		return Outcome{Progress: ProgressAccepted}
 	}
 	code, msg := parseHerdrError(stderr)
 	switch code {
-	case "agent_blocked":
+	case "agent_blocked", "server_not_running":
 		return Outcome{Progress: ProgressDeferred, Code: code, Note: msg}
 	case "":
 		return Outcome{Progress: ProgressFailed, Code: "exit_" + itoa(exitCode), Note: strings.TrimSpace(stderr)}
 	default:
 		return Outcome{Progress: ProgressFailed, Code: code, Note: msg}
 	}
+}
+
+// Gate decides from an agent's visible screen whether text may be typed
+// into it now. Typing into a box that holds someone's unsent draft merges
+// the two and submits both; Enter on a trust dialog accepts it for every
+// later session in that folder. Both defer until the screen changes. A box
+// this package cannot place (unknown kind or layout) does not block.
+func Gate(kind, ansiScreen string) (Outcome, bool) {
+	if phrase, ok := screen.TrustScreen(kind, ansiScreen); ok {
+		return Outcome{Progress: ProgressDeferred, Code: "trust_screen", Note: phrase}, false
+	}
+	if screen.Check(kind, ansiScreen) == screen.Typed {
+		return Outcome{Progress: ProgressDeferred, Code: "draft_in_box", Note: "the input box holds unsent text"}, false
+	}
+	return Outcome{}, true
 }
 
 func parseHerdrError(stderr string) (code, message string) {
