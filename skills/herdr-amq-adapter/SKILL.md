@@ -92,8 +92,9 @@ message id, thread, and refs while each destination takes its turn through
 the spool; recipients need not receive it simultaneously.
 
 For a multi-round exchange you drive yourself (adversarial review with a
-fix loop, single audit, test-hardening attack, or a debate between peers),
-read `references/patterns.md`. To start or inspect an agent on another
+fix loop, single audit, test-hardening attack, a debate between peers, or
+delegating separate tasks to workers and tracking their reports), read
+`references/patterns.md`. To start or inspect an agent on another
 machine (`herdr --machine`), read `references/remote-machines.md`.
 
 ## Inspect delivery status
@@ -127,6 +128,7 @@ existing process; report it instead of claiming the new build is active.
   `amq-agent`); their worker context does not exist here.
 - Mail arrives while you work: the doorbell is queued into your running
   turn like a user message. Delivery only waits while Herdr shows you as
-  `blocked` (an approval or question dialog), retrying with a backoff that
-  starts at 5s and caps at 2m between attempts for as long as the mail is
-  pending.
+  `blocked` (an approval or question dialog), while your input box holds
+  text the user has not sent, or while a trust dialog is on screen,
+  retrying with a backoff that starts at 5s and caps at 2m between attempts
+  for as long as the mail is pending.
