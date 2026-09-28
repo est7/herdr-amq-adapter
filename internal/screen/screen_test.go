@@ -124,3 +124,30 @@ func TestTruncatedOpencodeBoxDoesNotPanic(t *testing.T) {
 		t.Errorf("got %v", got)
 	}
 }
+
+// Claude Code shows the session title in the input box's top border
+// (`──── <title> ─`). The box is still found, so a draft there is seen.
+func TestClaudeBoxWithATitledBorder(t *testing.T) {
+	rule := strings.Repeat("─", 60)
+	top := "\x1b[38;2;136;136;136m" + rule + " Herdr-projects 项目探索 ─\x1b[0m"
+	screen := func(box string) string {
+		return "✶ Batting yarn… (51s)\n\n" + top + "\n" + box + "\n" + rule + "\n  status line\n"
+	}
+	for name, tc := range map[string]struct {
+		box  string
+		want Draft
+	}{
+		"queued hint": {"❯ \x1b[2mPress up to edit queued messages\x1b[0m", Empty},
+		"empty":       {"❯ ", Empty},
+		"cjk draft":   {"❯ 你好", Typed},
+		"draft":       {"❯ amq 的 config 里:", Typed},
+	} {
+		if got := Check("claude", screen(tc.box)); got != tc.want {
+			t.Errorf("%s: got %v want %v", name, got, tc.want)
+		}
+	}
+	// A transcript line that only starts with dashes is not the border.
+	if got := Check("claude", "── note\n❯ old prompt\n"+rule+"\n"); got != Unknown {
+		t.Errorf("short dash line taken as a border: %v", got)
+	}
+}

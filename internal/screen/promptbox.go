@@ -184,6 +184,17 @@ func isRule(l line) bool {
 	return utf8.RuneCountInString(t) >= 10 && strings.Trim(t, "─") == ""
 }
 
+// isBorder reports a box border: a rule, or a rule that opens with at least
+// ten `─` and carries a label (Claude Code puts the session title there:
+// `──── <title> ─`).
+func isBorder(l line) bool {
+	if isRule(l) {
+		return true
+	}
+	t := strings.TrimSpace(l.text())
+	return strings.HasPrefix(t, strings.Repeat("─", 10))
+}
+
 // typed is the text in a box's cells: non-blank, not dim, and not a
 // harness-drawn cursor sitting on a dim placeholder.
 func typed(cells line) string {
@@ -220,15 +231,15 @@ func inputBox(kind string, lines []line) ([]line, bool) {
 		return []line{row}, ok
 	}
 	switch kind {
-	// `❯` right under a rule, continued until the next rule.
+	// `❯` right under a border, continued until the next border.
 	case "claude":
-		at := lastIndex(lines, func(i int, l line) bool { return trimmedStarts(l, "❯") && i > 0 && isRule(lines[i-1]) })
+		at := lastIndex(lines, func(i int, l line) bool { return trimmedStarts(l, "❯") && i > 0 && isBorder(lines[i-1]) })
 		if at < 0 {
 			return nil, false
 		}
 		end := -1
 		for i := at + 1; i < len(lines); i++ {
-			if isRule(lines[i]) {
+			if isBorder(lines[i]) {
 				end = i
 				break
 			}
