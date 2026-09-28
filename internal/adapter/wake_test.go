@@ -7,6 +7,9 @@ import (
 
 const checkValid = `{"schema":2,"agent":"claude-2","wake":{"status":"valid","live":true,"pid":88168,"mode":"inject-via","owner_bound":false,"generation":"565a19d9fb55b5fef7564769ebc161d7","target_digest":"sha256:b0b8"}}`
 const checkStale = `{"schema":2,"agent":"bob","wake":{"status":"stale","live":false,"pid":21119,"generation":"595690c624217b8bdb2e631c44db7411","target_digest":"sha256:x"}}`
+
+// A live waker still running the AMQ image it started with, after an upgrade.
+const checkValidOldImage = `{"schema":2,"agent":"claude","wake":{"status":"valid","live":true,"pid":40453,"mode":"inject-via","owner_bound":false,"generation":"25a9b211849c2ccc64382bd406bf8e40","target_digest":"sha256:30f1"},"image":{"running":{"path":"/opt/homebrew/Cellar/amq/0.80.1/bin/amq","version":"0.80.1"},"current":{"path":"/opt/homebrew/Cellar/amq/0.81.1/bin/amq","version":"0.81.1"},"status":"different"}}`
 const checkMissing = `{"schema":2,"agent":"bob","wake":{"status":"missing","live":false,"pid":null,"mode":null,"owner_bound":false,"generation":null,"target_digest":null}}`
 
 func TestParseWakeCheck(t *testing.T) {
@@ -17,6 +20,13 @@ func TestParseWakeCheck(t *testing.T) {
 	st, err = ParseWakeCheck([]byte(checkMissing))
 	if err != nil || st.Status != "missing" || st.Live || st.PID != 0 || st.Generation != "" {
 		t.Fatalf("missing: %+v err=%v", st, err)
+	}
+	if st.ImageOutdated {
+		t.Error("a check without an image block is not outdated")
+	}
+	st, err = ParseWakeCheck([]byte(checkValidOldImage))
+	if err != nil || !st.ImageOutdated {
+		t.Fatalf("old image: %+v err=%v", st, err)
 	}
 	if _, err := ParseWakeCheck([]byte(`{"schema":1,"wake":{}}`)); err == nil {
 		t.Error("schema 1 must be rejected")
@@ -35,6 +45,9 @@ func TestDecideWake(t *testing.T) {
 		want WakeDecision
 	}{
 		{"live same", checkValid, want, true, DecisionKeep},
+		// `--no-self-upgrade` keeps a waker on the AMQ it started with; the
+		// adapter is its supervisor and replaces it after an upgrade.
+		{"live same, old amq image", checkValidOldImage, want, true, DecisionReplace},
 		{"live old binary", checkValid, other, true, DecisionReplace},
 		{"live but record keyed by moved pane", checkValid, moved, true, DecisionReplace},
 		{"live no target file", checkValid, WakeTarget{}, false, DecisionReplace},

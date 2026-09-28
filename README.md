@@ -70,7 +70,7 @@ prints the build (VCS revision, `-modified` when dirty).
 | `herdr pane move` gives the pane a new id | re-key the record, write an identity file for the new id, keep the old one (the moved process still sees its original `HERDR_PANE_ID`); the waker is untouched because delivery targets the agent **name**, which Herdr carries across moves |
 | agent released, pane stays open | retire the waker; keep the record (pid 0) and identity file so the next agent detected in this pane is offered the same handle (Herdr drops the live name on release) |
 | pane closed or exited | retire the waker, remove identity files (current id and aliases) and the record |
-| Herdr session restore, or action `reconcile` | diff live agents vs records: retire records whose pane hosts no agent; re-adopt panes whose waker is stale, renamed, or still pointing `--inject-via` at a previous plugin build |
+| Herdr session restore, or action `reconcile` | diff live agents vs records: retire records whose pane hosts no agent; re-adopt panes whose waker is stale, renamed, still pointing `--inject-via` at a previous plugin build, or still running an AMQ binary older than the installed one (wakers run with `--no-self-upgrade`, so run reconcile after upgrading `amq`) |
 
 Paths (fixed, per user):
 

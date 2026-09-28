@@ -91,6 +91,9 @@ type WakeState struct {
 	TargetDigest string
 	Target       WakeTarget
 	HasTarget    bool
+	// ImageOutdated: the waker runs an older AMQ binary than the one now
+	// installed (`image.status` = "different").
+	ImageOutdated bool
 }
 
 // ParseWakeCheck decodes `amq wake check --json --json-schema 2`.
@@ -104,6 +107,9 @@ func ParseWakeCheck(js []byte) (WakeState, error) {
 			Generation   *string `json:"generation"`
 			TargetDigest *string `json:"target_digest"`
 		} `json:"wake"`
+		Image struct {
+			Status string `json:"status"`
+		} `json:"image"`
 	}
 	if err := json.Unmarshal(js, &doc); err != nil {
 		return WakeState{}, fmt.Errorf("decode wake check: %w", err)
@@ -111,7 +117,7 @@ func ParseWakeCheck(js []byte) (WakeState, error) {
 	if doc.Schema != 2 {
 		return WakeState{}, fmt.Errorf("wake check schema %d, want 2", doc.Schema)
 	}
-	st := WakeState{Status: doc.Wake.Status, Live: doc.Wake.Live}
+	st := WakeState{Status: doc.Wake.Status, Live: doc.Wake.Live, ImageOutdated: doc.Image.Status == "different"}
 	if doc.Wake.PID != nil {
 		st.PID = *doc.Wake.PID
 	}
@@ -194,8 +200,10 @@ const (
 	// DecisionRepair: proven-stale lock whose saved target is the wanted one;
 	// amq restarts it from that target.
 	DecisionRepair
-	// DecisionReplace: a waker (live or stale) with a different target, or any
-	// other lock state; retire it by its exact saved identity, then start.
+	// DecisionReplace: a waker (live or stale) with a different target, a live
+	// one still running an AMQ binary older than the installed one (it runs
+	// with --no-self-upgrade, so the adapter is its supervisor), or any other
+	// lock state; retire it by its exact saved identity, then start.
 	DecisionReplace
 )
 
@@ -217,7 +225,7 @@ func DecideWake(st WakeState, want WakeTarget) WakeDecision {
 	switch {
 	case st.Status == "missing":
 		return DecisionStart
-	case st.Status == "valid" && st.Live && same:
+	case st.Status == "valid" && st.Live && same && !st.ImageOutdated:
 		return DecisionKeep
 	case st.Status == "stale" && same:
 		return DecisionRepair
