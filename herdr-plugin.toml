@@ -1,6 +1,6 @@
 id = "est7.amq-adapter"
 name = "AMQ Adapter"
-version = "0.3.2"
+version = "0.3.3"
 min_herdr_version = "0.9.1"
 description = "Agents in Herdr panes message each other over AMQ with zero config: auto-named handles, one shared root, delivery via `herdr agent prompt`."
 platforms = ["linux", "macos"]
