@@ -26,8 +26,8 @@ mislabel it. orch does exactly this, and herdr-projects keeps reports,
 | T2 | envelope | AMQ message with `id`, `thread`, `refs`, `kind`, subject, body | AMQ-owned |
 | T3 | doorbell | one line typed into the agent: AMQ's notice plus the identity path; never the message body | have |
 | T4 | delivery gate | type only when the screen allows it: no unsent draft, no trust dialog, not `blocked`; failures that typed nothing defer | have (`internal/screen`, `Gate`, `ClassifyHerdrResult`) |
-| T5 | delivery-state facts per message id | enqueued → doorbell accepted / deferred / failed → drained (receipt) → DLQ; "injected" never counts as "drained" | partial: AMQ keeps receipts; injection outcomes are only in waker logs |
-| T6 | injection-failure evidence | a durable, queryable record that a doorbell failed terminally (orch: `undeliverable-agent-absent`) | gap |
+| T5 | delivery-state facts per message id | enqueued → doorbell accepted / deferred / retried / invalid → drained (receipt) → DLQ; "injected" never counts as "drained" | have, AMQ-owned: `notification-attempts.jsonl` per agent, `amq trace <id>`, `amq doctor --ops --json` (unread, DLQ, attempts). It records a deferral only as "exit status 1" |
+| T6 | delivery reason | why the injector deferred or failed (draft_in_box, trust_screen, server_not_running, …) | have: `<state>/inject/<handle>.jsonl` (bounded, rotated), shown per agent in the status popup. An upstream `AMQ_INJECT_DETAIL` was judged unlikely to land |
 | T7 | same-thread redeliver | resend the same body on the same thread with a fresh id so the wake fires again (orch's nudge for undrained mail) | gap; `amq send --thread` already allows it by hand |
 | T8 | cross-machine reply | `amq reply --id` answers a bridged message on its thread | gap: AMQ 0.80.1 stores bridged mail under a transfer file name; agents fall back to `send --thread`. Upstream fix |
 | S1 | identity binding | the pane → (handle, root) mapping an agent sources | have: identity file keyed by pane id |
@@ -45,10 +45,8 @@ as today.
 
 ## Proposed order
 
-1. T6 + T5 together: append one JSON line per inject outcome (message
-   cohort, handle, marker, code, time) under the state dir, and show the
-   last outcomes per handle in `status`. Cheap, and it is the evidence T7
-   and any doctor need.
+1. Departed mailboxes (open question above): tombstone + grace period +
+   periodic gc.
 2. S3: `herdr-amq-adapter whoami` from inside a pane, used by the skill
    instead of sourcing the file blind.
 3. T8: report upstream with a reproducer; keep the skill's fallback until

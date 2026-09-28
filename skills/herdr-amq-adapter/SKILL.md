@@ -106,7 +106,8 @@ herdr plugin action invoke est7.amq-adapter.dashboard
 ```
 
 It refreshes every five seconds; `r` refreshes, `j`/`k` scroll, and
-`q`/Escape closes. It shows local wakers and unread counts, remote routes
+`q`/Escape closes. It shows local wakers, unread counts, the last doorbell per agent and
+why it was deferred or failed (for example `draft_in_box`), remote routes
 and last successful inventory sync, runner freshness, relay reachability,
 alias/spool backlog, quarantine, and read errors. An unknown sync time or
 an unreadable queue is not proof of a healthy or empty queue.

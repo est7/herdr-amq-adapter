@@ -22,6 +22,7 @@ import (
 type agentView struct {
 	Handle, Pane, Server, Wake string
 	Pending                    int
+	Last                       *adapter.InjectEntry // nil: no attempt recorded
 	Err                        string
 }
 type popupView struct {
@@ -53,6 +54,11 @@ func inspectPopup(ctx context.Context, e env) popupView {
 			a.Pending = -1
 			a.Err = err.Error()
 		}
+		if last, ok, err := adapter.LastInject(e.stateDir, r.Handle); err != nil {
+			a.Err = err.Error()
+		} else if ok {
+			a.Last = &last
+		}
 		v.Agents = append(v.Agents, a)
 	}
 	snap, err := bridge.LoadSnapshot(e.configDir)
@@ -62,6 +68,32 @@ func inspectPopup(ctx context.Context, e env) popupView {
 		v.Bridge = inspectBridge(ctx, e, snap)
 	}
 	return v
+}
+
+// lastDelivery is the injector's own view of its last attempt; amq trace
+// keeps the per-message states.
+func lastDelivery(e *adapter.InjectEntry, now time.Time) string {
+	if e == nil {
+		return "尚无投递记录"
+	}
+	what := string(e.Progress)
+	if e.Code != "" {
+		what += "(" + e.Code + ")"
+	}
+	return what + " · " + sinceZH(e.At, now)
+}
+
+func sinceZH(at, now time.Time) string {
+	d := now.Sub(at)
+	switch {
+	case d < time.Minute:
+		return "刚刚"
+	case d < time.Hour:
+		return fmt.Sprintf("%d 分钟前", int(d/time.Minute))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%d 小时前", int(d/time.Hour))
+	}
+	return fmt.Sprintf("%d 天前", int(d/(24*time.Hour)))
 }
 
 // Rendering consumes one observation; it never provisions or repairs anything.
@@ -76,6 +108,7 @@ func popupLines(v popupView) []string {
 			pending = "读取失败"
 		}
 		lines = append(lines, fmt.Sprintf("  %-16s %-8s  %s / %s", a.Handle, a.Pane, a.Wake, pending))
+		lines = append(lines, "    最近投递: "+lastDelivery(a.Last, v.At))
 		if a.Err != "" {
 			lines = append(lines, "    错误: "+a.Err)
 		}

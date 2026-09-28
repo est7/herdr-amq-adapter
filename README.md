@@ -228,7 +228,8 @@ herdr plugin pane open --plugin est7.amq-adapter --entrypoint status
 ```
 
 The popup refreshes every five seconds. `r` refreshes, `j`/`k` scroll, and
-`q`/Escape closes it. It shows local waker state and unread messages, remote
+`q`/Escape closes it. It shows local waker state, unread messages, the last doorbell per agent
+with the reason it was deferred or failed (`<state>/inject/<handle>.jsonl`), remote
 route inventory with its last successful sync time, runner freshness, relay
 reachability, alias/spool backlog, quarantine, and read errors. Remote inventory
 is a last-known route, not proof that a remote agent is online. Older peer files

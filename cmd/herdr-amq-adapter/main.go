@@ -129,15 +129,8 @@ const pluginID = "est7.amq-adapter"
 // driving this binary over SSH) the dirs fall back to Herdr's fixed
 // per-user layout for this plugin id.
 func loadEnv() (env, error) {
-	stateDir := os.Getenv("HERDR_PLUGIN_STATE_DIR")
-	configDir := os.Getenv("HERDR_PLUGIN_CONFIG_DIR")
 	home, _ := os.UserHomeDir()
-	if stateDir == "" {
-		stateDir = filepath.Join(home, ".local", "state", "herdr", "plugins", pluginID)
-	}
-	if configDir == "" {
-		configDir = filepath.Join(home, ".config", "herdr", "plugins", "config", pluginID)
-	}
+	stateDir, configDir := pluginDirs(home)
 	store, err := adapter.NewStore(stateDir)
 	if err != nil {
 		return env{}, err
@@ -162,6 +155,20 @@ func loadEnv() (env, error) {
 		root:      filepath.Join(stateDir, "amq-root"),
 		configDir: configDir,
 	}, nil
+}
+
+// pluginDirs are Herdr's plugin state and config dirs, from the plugin
+// environment or Herdr's fixed per-user layout for this plugin id.
+func pluginDirs(home string) (stateDir, configDir string) {
+	stateDir = os.Getenv("HERDR_PLUGIN_STATE_DIR")
+	configDir = os.Getenv("HERDR_PLUGIN_CONFIG_DIR")
+	if stateDir == "" {
+		stateDir = filepath.Join(home, ".local", "state", "herdr", "plugins", pluginID)
+	}
+	if configDir == "" {
+		configDir = filepath.Join(home, ".config", "herdr", "plugins", "config", pluginID)
+	}
+	return stateDir, configDir
 }
 
 // findBin resolves a companion binary: env override, PATH, then the usual
@@ -558,13 +565,18 @@ func runInject(args []string) int {
 		return 2
 	}
 	paneID, handle, root, payload := args[0], args[1], args[2], args[3]
-	configDir := os.Getenv("HERDR_PLUGIN_CONFIG_DIR")
+	home, _ := os.UserHomeDir()
+	stateDir, configDir := pluginDirs(home)
 	id := adapter.Identity{PaneID: paneID, Handle: handle, Root: root}
 	text := adapter.Notice(payload, id, adapter.IdentityPath(configDir, paneID))
 	// Target the agent by its live name, not the pane: the name follows the
 	// occupant across `herdr pane move`, the pane id does not.
 	out, _ := adapter.HerdrFromEnv().Deliver(handle, text, promptTimeout)
 	fmt.Fprintf(os.Stderr, "AMQ_INJECT_PROGRESS=%s\n", out.Progress)
+	// The reason log never changes the outcome amq sees.
+	if err := adapter.RecordInject(stateDir, handle, out, time.Now()); err != nil {
+		fmt.Fprintf(os.Stderr, "herdr-amq-adapter: inject log: %v\n", err)
+	}
 	if out.Code != "" {
 		fmt.Fprintf(os.Stderr, "herdr-amq-adapter: inject pane=%s %s %s\n", paneID, out.Code, out.Note)
 	}

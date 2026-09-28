@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/est7/herdr-amq-adapter/internal/adapter"
 	"github.com/est7/herdr-amq-adapter/internal/bridge"
 )
 
@@ -47,5 +48,20 @@ func TestPopupWrapKeepsFullError(t *testing.T) {
 	}
 	if got := cropLine("状态abcd", 6); got != "状态ab" {
 		t.Fatalf("column width: %s", got)
+	}
+}
+
+// The popup says why the last doorbell to an agent did not go through.
+func TestPopupShowsTheLastDeliveryAndItsReason(t *testing.T) {
+	now := time.Now()
+	v := popupView{At: now, Agents: []agentView{
+		{Handle: "claude", Pane: "w1:p1", Wake: "valid", Last: &adapter.InjectEntry{At: now.Add(-2 * time.Minute), Progress: adapter.ProgressDeferred, Code: "draft_in_box"}},
+		{Handle: "codex", Pane: "w1:p2", Wake: "valid"},
+	}}
+	text := strings.Join(popupLines(v), "\n")
+	for _, want := range []string{"deferred(draft_in_box)", "2 分钟前", "尚无投递记录"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("missing %q in\n%s", want, text)
+		}
 	}
 }
