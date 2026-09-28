@@ -44,8 +44,9 @@ The agent's skill does the rest (`amq send`, a doorbell in the other pane,
 herdr plugin action invoke est7.amq-adapter.dashboard
 ```
 
-**Update** to the newest release (reinstalls through Herdr, then re-adopts
-agents with the new binary):
+**Update** to the newest release (reinstalls through Herdr, then runs the new
+binary's `configure`: relinks the command and skill to the new install and
+re-adopts agents):
 
 ```bash
 herdr-amq-adapter update           # or: update --check to only compare versions

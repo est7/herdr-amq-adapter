@@ -169,9 +169,10 @@ func runUpdate(args []string) error {
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("herdr plugin install %s --ref %s: %w (the installed version is unchanged)", adapterRepo, latest, err)
 	}
-	// The new binary adopts agents and replaces wakers that still point at
-	// the old one.
-	cmd = exec.Command(herdr, "plugin", "action", "invoke", pluginID+".reconcile")
+	// The new binary's configure repoints the command and skill links at the
+	// new install (its folder can differ from the old one's), then adopts
+	// agents and replaces wakers that still point at the old binary.
+	cmd = exec.Command(herdr, "plugin", "action", "invoke", pluginID+".configure")
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 	return cmd.Run()
 }
