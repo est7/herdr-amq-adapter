@@ -66,3 +66,16 @@ func TestInjectLogRotates(t *testing.T) {
 		t.Fatalf("last after rotation: %+v", got)
 	}
 }
+
+// G3: logging runs inside the injector's time budget: a stuck write is
+// abandoned rather than delaying the exit amq is waiting for.
+func TestWithinGivesUpOnAStuckStep(t *testing.T) {
+	start := time.Now()
+	err := Within(50*time.Millisecond, func() error { time.Sleep(2 * time.Second); return nil })
+	if err == nil || time.Since(start) > time.Second {
+		t.Fatalf("err=%v after %v", err, time.Since(start))
+	}
+	if err := Within(time.Second, func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+}

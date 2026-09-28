@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -49,6 +48,32 @@ func (p GCPlan) Empty() bool {
 	return len(p.Archive) == 0 && len(p.Forget) == 0 && len(p.Purge) == 0
 }
 
+// archiveMarker is written into every mailbox this package archives. Only a
+// dir carrying it is an archive: anything else in the archive dir is left
+// alone, whatever its name.
+const archiveMarker = ".amq-adapter-archive"
+
+type archiveMark struct {
+	Handle       string `json:"handle"`
+	ArchivedUnix int64  `json:"archived_unix"`
+}
+
+// ReservedHandles are the handles an unnamed newcomer in paneID must not be
+// given: departed agents' (tombstones) and those other panes' records still
+// hold, whose stop may simply not have run yet (hooks arrive in any order).
+func ReservedHandles(tombs []Tombstone, recs []WakerRecord, paneID string) []string {
+	var out []string
+	for _, t := range tombs {
+		out = append(out, t.Handle)
+	}
+	for _, r := range recs {
+		if r.PaneID != paneID {
+			out = append(out, r.Handle)
+		}
+	}
+	return out
+}
+
 // PlanGC decides a pass from tombstones, live agents, waker records and
 // archives. It never plans to touch a handle a live agent or a record holds.
 func PlanGC(tombs []Tombstone, live []AgentInfo, recs []WakerRecord, archives []Archive, now time.Time, grace, keep time.Duration) GCPlan {
@@ -76,71 +101,138 @@ func PlanGC(tombs []Tombstone, live []AgentInfo, recs []WakerRecord, archives []
 }
 
 // RunGC carries out a plan. Each step is idempotent, so a pass that died
-// halfway is finished by the next one.
+// halfway is finished by the next one. A tombstone is forgotten only once
+// its handle is off the amq agent list.
 func RunGC(ctx context.Context, amqBin, root string, s *Store, plan GCPlan, now time.Time) error {
 	var errs []error
 	for _, h := range plan.Archive {
-		if err := archiveMailbox(ctx, amqBin, root, s.archiveDir(), h, now); err != nil {
+		done, err := s.archiveMailbox(ctx, amqBin, root, h, now)
+		if err != nil {
 			errs = append(errs, err)
 			continue
 		}
-		errs = append(errs, s.DeleteTombstone(h))
+		if done {
+			errs = append(errs, s.DeleteTombstone(h))
+		}
 	}
 	for _, h := range plan.Forget {
 		errs = append(errs, s.DeleteTombstone(h))
 	}
 	for _, d := range plan.Purge {
-		if strings.ContainsAny(d, `/\`) || d == "." || d == ".." {
-			errs = append(errs, fmt.Errorf("gc: refusing to purge %q", d))
-			continue
-		}
-		errs = append(errs, os.RemoveAll(filepath.Join(s.archiveDir(), d)))
+		errs = append(errs, s.purgeArchive(d))
 	}
 	return errors.Join(errs...)
 }
 
-// archiveMailbox moves handle's mailbox out of the root and drops it from
-// the amq agent list, under the registry lock every list writer takes.
-func archiveMailbox(ctx context.Context, amqBin, root, archiveDir, handle string, now time.Time) error {
-	if !herdrNameRe.MatchString(handle) {
-		return fmt.Errorf("gc: invalid handle %q", handle)
-	}
-	unlock, err := lockMailboxRegistry(ctx, root)
+// purgeArchive removes one archive, only when it is a real dir (not a
+// link) inside a real archive dir and carries this package's marker.
+func (s *Store) purgeArchive(name string) error {
+	base, err := s.archiveBase()
 	if err != nil {
 		return err
 	}
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\`) {
+		return fmt.Errorf("gc: refusing to purge %q", name)
+	}
+	dir := filepath.Join(base, name)
+	if !isRealDir(dir) || readMark(dir) == nil {
+		return fmt.Errorf("gc: refusing to purge %s: not an archive this adapter made", dir)
+	}
+	return os.RemoveAll(dir)
+}
+
+// archiveBase is the archive dir; a link there is refused, so nothing is
+// ever listed or removed through it.
+func (s *Store) archiveBase() (string, error) {
+	base := s.archiveDir()
+	st, err := os.Lstat(base)
+	if errors.Is(err, os.ErrNotExist) {
+		return base, nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if !st.IsDir() {
+		return "", fmt.Errorf("gc: %s is not a plain directory; refusing to use it", base)
+	}
+	return base, nil
+}
+
+func isRealDir(path string) bool {
+	st, err := os.Lstat(path)
+	return err == nil && st.IsDir()
+}
+
+func readMark(dir string) *archiveMark {
+	p := filepath.Join(dir, archiveMarker)
+	st, err := os.Lstat(p)
+	if err != nil || !st.Mode().IsRegular() {
+		return nil
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return nil
+	}
+	var m archiveMark
+	if json.Unmarshal(b, &m) != nil || m.ArchivedUnix == 0 {
+		return nil
+	}
+	return &m
+}
+
+// archiveMailbox moves handle's mailbox out of the root and drops it from
+// the amq agent list, under the registry lock every list writer takes.
+// done is false while the list cannot drop it yet: amq refuses an empty
+// list, so the last agent stays listed until another one joins.
+func (s *Store) archiveMailbox(ctx context.Context, amqBin, root, handle string, now time.Time) (done bool, err error) {
+	if !herdrNameRe.MatchString(handle) {
+		return false, fmt.Errorf("gc: invalid handle %q", handle)
+	}
+	archiveDir, err := s.archiveBase()
+	if err != nil {
+		return false, err
+	}
+	unlock, err := lockMailboxRegistry(ctx, root)
+	if err != nil {
+		return false, err
+	}
 	defer unlock()
 	src := filepath.Join(root, "agents", handle)
-	if _, err := os.Stat(src); err == nil {
+	if isRealDir(src) {
 		if err := os.MkdirAll(archiveDir, 0o755); err != nil {
-			return err
+			return false, err
 		}
 		dst := filepath.Join(archiveDir, fmt.Sprintf("%s-%d", handle, now.Unix()))
 		for i := 2; ; i++ {
-			if _, err := os.Stat(dst); errors.Is(err, os.ErrNotExist) {
+			if _, err := os.Lstat(dst); errors.Is(err, os.ErrNotExist) {
 				break
 			}
 			dst = filepath.Join(archiveDir, fmt.Sprintf("%s-%d.%d", handle, now.Unix(), i))
 		}
 		if err := os.Rename(src, dst); err != nil {
-			return fmt.Errorf("gc: archive %s: %w", handle, err)
+			return false, fmt.Errorf("gc: archive %s: %w", handle, err)
 		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
+		mark, err := json.Marshal(archiveMark{Handle: handle, ArchivedUnix: now.Unix()})
+		if err != nil {
+			return false, err
+		}
+		if err := os.WriteFile(filepath.Join(dst, archiveMarker), mark, 0o644); err != nil {
+			return false, fmt.Errorf("gc: mark archive %s: %w", dst, err)
+		}
 	}
 	cfgPath := filepath.Join(root, "meta", "config.json")
 	b, err := os.ReadFile(cfgPath)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil
+		return true, nil
 	}
 	if err != nil {
-		return err
+		return false, err
 	}
 	var cfg struct {
 		Agents []string `json:"agents"`
 	}
 	if err := json.Unmarshal(b, &cfg); err != nil {
-		return fmt.Errorf("decode amq config: %w", err)
+		return false, fmt.Errorf("decode amq config: %w", err)
 	}
 	var kept []string
 	for _, a := range cfg.Agents {
@@ -148,16 +240,19 @@ func archiveMailbox(ctx context.Context, amqBin, root, archiveDir, handle string
 			kept = append(kept, a)
 		}
 	}
-	if len(kept) == len(cfg.Agents) || len(kept) == 0 {
-		return nil
+	switch {
+	case len(kept) == len(cfg.Agents):
+		return true, nil
+	case len(kept) == 0:
+		return false, nil
 	}
 	cmd := exec.CommandContext(ctx, amqBin, "init", "--root", root, "--agents", strings.Join(kept, ","), "--force")
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("amq init --force %s: %w: %s", root, err, out.String())
+		return false, fmt.Errorf("amq init --force %s: %w: %s", root, err, out.String())
 	}
-	return nil
+	return true, nil
 }
 
 func (s *Store) tombstoneDir() string { return filepath.Join(filepath.Dir(s.dir), "tombstones") }
@@ -226,10 +321,14 @@ func (s *Store) Tombstones() ([]Tombstone, error) {
 	return out, nil
 }
 
-// Archives lists archived mailboxes; a dir whose name carries no time is
-// not one this package made and is left alone.
+// Archives lists the archives this package made: real dirs carrying its
+// marker, dated by the marker. Anything else is not an archive.
 func (s *Store) Archives() ([]Archive, error) {
-	entries, err := os.ReadDir(s.archiveDir())
+	base, err := s.archiveBase()
+	if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(base)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
@@ -238,19 +337,13 @@ func (s *Store) Archives() ([]Archive, error) {
 	}
 	var out []Archive
 	for _, e := range entries {
-		if !e.IsDir() {
+		dir := filepath.Join(base, e.Name())
+		if !isRealDir(dir) {
 			continue
 		}
-		name := e.Name()
-		stamp := name[strings.LastIndexByte(name, '-')+1:]
-		if i := strings.IndexByte(stamp, '.'); i >= 0 {
-			stamp = stamp[:i]
+		if m := readMark(dir); m != nil {
+			out = append(out, Archive{Dir: e.Name(), ArchivedUnix: m.ArchivedUnix})
 		}
-		unix, err := strconv.ParseInt(stamp, 10, 64)
-		if err != nil || !strings.Contains(name, "-") {
-			continue
-		}
-		out = append(out, Archive{Dir: name, ArchivedUnix: unix})
 	}
 	return out, nil
 }

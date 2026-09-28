@@ -30,7 +30,10 @@ import (
 	"github.com/est7/herdr-amq-adapter/internal/rendezvous"
 )
 
-const promptTimeout = 4 * time.Second // < amq --inject-timeout (5s)
+const (
+	promptTimeout   = 4 * time.Second        // < amq --inject-timeout (5s)
+	injectLogBudget = 300 * time.Millisecond // promptTimeout + this stays under it
+)
 
 // version identifies the running build: -ldflags "-X main.version=<tag>"
 // when set, otherwise the VCS revision Go stamps into any build made from
@@ -292,11 +295,11 @@ func ensure(e env, paneID string) error {
 		if err != nil {
 			return err
 		}
-		reserved := make([]string, 0, len(tombs))
-		for _, t := range tombs {
-			reserved = append(reserved, t.Handle)
+		recs, err := e.store.List()
+		if err != nil {
+			return err
 		}
-		handle = adapter.AdoptHandle(info, live, rec, exists, reserved)
+		handle = adapter.AdoptHandle(info, live, rec, exists, adapter.ReservedHandles(tombs, recs, paneID))
 		if err := e.herdr.AgentRename(ctx, paneID, handle); err != nil {
 			return err
 		}
@@ -640,8 +643,9 @@ func runInject(args []string) int {
 	// occupant across `herdr pane move`, the pane id does not.
 	out, _ := adapter.HerdrFromEnv().Deliver(handle, text, promptTimeout)
 	fmt.Fprintf(os.Stderr, "AMQ_INJECT_PROGRESS=%s\n", out.Progress)
-	// The reason log never changes the outcome amq sees.
-	if err := adapter.RecordInject(stateDir, handle, out, time.Now()); err != nil {
+	// The reason log never changes the outcome amq sees: it is bounded so the
+	// injector still exits inside amq's --inject-timeout.
+	if err := adapter.Within(injectLogBudget, func() error { return adapter.RecordInject(stateDir, handle, out, time.Now()) }); err != nil {
 		fmt.Fprintf(os.Stderr, "herdr-amq-adapter: inject log: %v\n", err)
 	}
 	if out.Code != "" {

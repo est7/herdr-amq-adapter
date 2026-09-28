@@ -110,6 +110,9 @@ func TestRunGC(t *testing.T) {
 	if err := os.MkdirAll(oldArchive, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(oldArchive, archiveMarker), []byte(`{"handle":"older","archived_unix":1}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	argsFile := filepath.Join(d, "amq-args")
 	amq := filepath.Join(d, "amq")
 	if err := os.WriteFile(amq, []byte("#!/bin/sh\necho \"$@\" > '"+argsFile+"'\n"), 0o700); err != nil {
@@ -144,4 +147,105 @@ func TestRunGC(t *testing.T) {
 	if err != nil || len(archives) != 1 || archives[0].Dir != "gone-1790600000" || archives[0].ArchivedUnix != 1790600000 {
 		t.Fatalf("archives %+v err %v", archives, err)
 	}
+}
+
+// G1: a handle another pane's record still holds is reserved even before
+// that pane's stop has run (hooks arrive in any order).
+func TestReservedHandlesIncludeOtherPanesRecords(t *testing.T) {
+	tombs := []Tombstone{{Handle: "gone"}}
+	recs := []WakerRecord{{PaneID: "w1:p1", Handle: "claude"}, {PaneID: "w1:p2", Handle: "claude-2"}}
+	got := ReservedHandles(tombs, recs, "w1:p1")
+	if !reflect.DeepEqual(got, []string{"gone", "claude-2"}) {
+		t.Fatalf("got %v", got)
+	}
+}
+
+func setupGC(t *testing.T) (state, root string, s *Store) {
+	t.Helper()
+	d := t.TempDir()
+	state, root = filepath.Join(d, "state"), filepath.Join(d, "root")
+	s, err := NewStore(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return state, root, s
+}
+
+// G2: an archive dir that is a symlink is never read or purged through.
+func TestArchivesRefuseASymlinkedArchiveDir(t *testing.T) {
+	state, _, s := setupGC(t)
+	outside := filepath.Join(t.TempDir(), "notes-1")
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, archiveMarker), []byte(`{"handle":"notes","archived_unix":1}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Dir(outside), filepath.Join(state, "archive")); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.Archives(); err == nil || len(got) != 0 {
+		t.Fatalf("symlinked archive dir listed: %+v err=%v", got, err)
+	}
+	if err := RunGC(context.Background(), "/nonexistent/amq", "/r", s, GCPlan{Purge: []string{"notes-1"}}, time.Unix(1790600000, 0)); err == nil {
+		t.Fatal("purge through a symlinked archive dir must fail")
+	}
+	if _, err := os.Stat(outside); err != nil {
+		t.Fatal("data behind the symlink was removed")
+	}
+}
+
+// G5: only dirs the adapter archived (with its marker) are archives; a
+// look-alike name is left alone, and the time comes from the marker.
+func TestArchivesAreOnlyMarkedDirs(t *testing.T) {
+	state, _, s := setupGC(t)
+	for _, d := range []string{"notes-1", "notes-1.backup", "claude-1790000000"} {
+		if err := os.MkdirAll(filepath.Join(state, "archive", d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(state, "archive", "claude-1790000000", archiveMarker), []byte(`{"handle":"claude","archived_unix":1790000123}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Archives()
+	if err != nil || len(got) != 1 || got[0].Dir != "claude-1790000000" || got[0].ArchivedUnix != 1790000123 {
+		t.Fatalf("got %+v err %v", got, err)
+	}
+	if err := RunGC(context.Background(), "/nonexistent/amq", "/r", s, GCPlan{Purge: []string{"notes-1"}}, time.Unix(1790600000, 0)); err == nil {
+		t.Fatal("purging an unmarked dir must fail")
+	}
+	if _, err := os.Stat(filepath.Join(state, "archive", "notes-1")); err != nil {
+		t.Fatal("unmarked dir was removed")
+	}
+}
+
+// G4: amq refuses an empty agent list, so archiving the last agent keeps
+// its tombstone (and the handle reserved) until the config can drop it.
+func TestArchivingTheLastAgentKeepsItsTombstone(t *testing.T) {
+	state, root, s := setupGC(t)
+	if err := os.MkdirAll(filepath.Join(root, "agents", "solo", "inbox", "new"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "meta"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "meta", "config.json"), []byte(`{"agents":["solo"]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PutTombstone(Tombstone{Handle: "solo", DepartedUnix: 1}); err != nil {
+		t.Fatal(err)
+	}
+	plan := GCPlan{Archive: []string{"solo"}}
+	for i := 0; i < 2; i++ { // a second pass is harmless
+		if err := RunGC(context.Background(), "/nonexistent/amq", root, s, plan, time.Unix(1790600000, 0)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if left, _ := s.Tombstones(); len(left) != 1 {
+		t.Fatalf("tombstone forgotten while the config still lists the handle: %+v", left)
+	}
+	if got, _ := s.Archives(); len(got) != 1 {
+		t.Fatalf("archives %+v", got)
+	}
+	_ = state
 }

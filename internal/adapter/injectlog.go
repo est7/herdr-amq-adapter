@@ -100,3 +100,17 @@ func truncate(s string, n int) string {
 	}
 	return s
 }
+
+// Within runs step and gives up waiting after budget, so a stuck write
+// (slow disk, a FIFO in its path) cannot outlast the injector's deadline.
+// A step still running is abandoned; the process exits soon after.
+func Within(budget time.Duration, step func() error) error {
+	done := make(chan error, 1)
+	go func() { done <- step() }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(budget):
+		return fmt.Errorf("gave up after %s", budget)
+	}
+}
