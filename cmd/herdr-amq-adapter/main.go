@@ -213,15 +213,16 @@ func runHook() error {
 	}
 	switch act.Kind {
 	case adapter.ActionEnsure:
-		return ensure(e, act.PaneID)
+		err = ensure(e, act.PaneID)
 	case adapter.ActionStop:
-		return stop(e, act.PaneID)
+		err = stop(e, act.PaneID)
 	case adapter.ActionPark:
-		return park(e, act.PaneID)
+		err = park(e, act.PaneID)
 	case adapter.ActionMove:
-		return move(e, act.PreviousPaneID, act.PaneID)
+		err = move(e, act.PreviousPaneID, act.PaneID)
 	}
-	return nil
+	collectGarbage(e)
+	return err
 }
 
 // move re-keys a waker record after `herdr pane move`. The waker itself keeps
@@ -287,7 +288,15 @@ func ensure(e env, paneID string) error {
 		if err != nil {
 			return err
 		}
-		handle = adapter.AdoptHandle(info, live, rec, exists)
+		tombs, err := e.store.Tombstones()
+		if err != nil {
+			return err
+		}
+		reserved := make([]string, 0, len(tombs))
+		for _, t := range tombs {
+			reserved = append(reserved, t.Handle)
+		}
+		handle = adapter.AdoptHandle(info, live, rec, exists, reserved)
 		if err := e.herdr.AgentRename(ctx, paneID, handle); err != nil {
 			return err
 		}
@@ -352,6 +361,10 @@ func ensure(e env, paneID string) error {
 		fresh.StartedUnix = time.Now().Unix()
 	}
 	if err := e.store.Put(fresh); err != nil {
+		return err
+	}
+	// The handle is in use again (its agent came back under its name).
+	if err := e.store.DeleteTombstone(handle); err != nil {
 		return err
 	}
 	fmt.Printf("%s pane=%s handle=%s waker pid=%d gen=%s identity=%s\n",
@@ -438,6 +451,12 @@ func stop(e env, paneID string) error {
 	if err := retireRecorded(ctx, e, rec); err != nil {
 		return err
 	}
+	// The handle stays reserved for a grace period, then its mailbox is
+	// archived (collectGarbage). Written before the record goes, so a crash
+	// in between leaves both rather than neither.
+	if err := e.store.PutTombstone(adapter.Tombstone{Handle: rec.Handle, DepartedUnix: time.Now().Unix(), Cwd: rec.Cwd, Agent: rec.Agent}); err != nil {
+		return err
+	}
 	if err := e.store.Delete(paneID); err != nil {
 		return err
 	}
@@ -492,10 +511,58 @@ func runReconcile() error {
 		}
 	}
 	fmt.Printf("reconcile: live=%d stopped=%d started=%d\n", len(live), len(plan.Stop), len(plan.Start))
+	collectGarbage(e)
 	if err := bridgeEnsure(); err != nil {
 		return fmt.Errorf("wakers reconciled, but bridge: %w", err)
 	}
 	return nil
+}
+
+const (
+	// gcGrace keeps a departed agent's handle reserved: Herdr may resume it
+	// under its name only once a client attaches, possibly the next day.
+	gcGrace = 24 * time.Hour
+	// gcKeep is how long an archived mailbox is kept before removal.
+	gcKeep = 30 * 24 * time.Hour
+)
+
+// collectGarbage archives departed agents' mailboxes after the grace period
+// and removes old archives. It runs under the lifecycle lock at the end of
+// every hook and reconcile; a failure is reported, never fatal to them.
+func collectGarbage(e env) {
+	if err := gcPass(e, time.Now()); err != nil {
+		fmt.Fprintln(os.Stderr, "herdr-amq-adapter: gc:", err)
+	}
+}
+
+func gcPass(e env, now time.Time) error {
+	tombs, err := e.store.Tombstones()
+	if err != nil {
+		return err
+	}
+	archives, err := e.store.Archives()
+	if err != nil {
+		return err
+	}
+	if len(tombs) == 0 && len(archives) == 0 {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	live, err := e.herdr.AgentList(ctx)
+	if err != nil {
+		return err
+	}
+	recs, err := e.store.List()
+	if err != nil {
+		return err
+	}
+	plan := adapter.PlanGC(tombs, live, recs, archives, now, gcGrace, gcKeep)
+	if plan.Empty() {
+		return nil
+	}
+	fmt.Printf("gc: archive=%v forget=%v purge=%v\n", plan.Archive, plan.Forget, plan.Purge)
+	return adapter.RunGC(ctx, e.amq, e.root, e.store, plan, now)
 }
 
 // This is a single-session adapter. Refuse the entire foreign lifecycle pass

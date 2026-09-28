@@ -34,24 +34,30 @@ mislabel it. orch does exactly this, and herdr-projects keeps reports,
 | S2 | occupant check | a record is inherited only by an agent with the same cwd and kind (pane ids restart after a Herdr server restart); an earlier occupant's handle is never given to a newcomer | have (`SameOccupant`, `Inherit`, `AdoptHandle`) |
 | S3 | verified whoami | resolve the calling pane, check its live agent name equals the recorded handle, print the identity; refuse on mismatch | gap; orch ADR 0007 rejects identity taken from ambient files or env alone |
 
-## Open question: a departed agent's mailbox
+## Departed agents' mailboxes (S4)
 
-When an agent leaves, `stop` retires its waker and record but its mailbox
-stays in the shared root. A later unnamed agent of the same kind can be
-given that handle by kind-based naming and receive the backlog (pre-dates
-S2; S2 only stops the reused-pane-id path). Deciding needs a handle
-lifecycle rule: bounce to DLQ, archive, reserve the handle, or accept reuse
-as today.
+When an agent leaves its pane, `stop` writes a tombstone
+(`<state>/tombstones/<handle>.json`). For 24 hours the handle is reserved:
+kind-based naming skips it, so a newcomer never reads the backlog, and the
+agent may come back under its name (the tombstone is dropped). After that a
+gc pass, run at the end of every hook and reconcile, moves the mailbox to
+`<state>/archive/<handle>-<unix>/` and drops the handle from the amq agent
+list; archives are removed after 30 days. Only tombstoned handles are
+touched, so bridge aliases and handles held by a record or a live agent are
+never archived.
+
+Residual: `amq send` to a handle not in the agent list only warns and
+recreates its mailbox (`--strict` refuses), so mail arriving after the
+archive waits there with no waker; mailboxes of agents that left before
+tombstones existed are not collected.
 
 ## Proposed order
 
-1. Departed mailboxes (open question above): tombstone + grace period +
-   periodic gc.
-2. S3: `herdr-amq-adapter whoami` from inside a pane, used by the skill
+1. S3: `herdr-amq-adapter whoami` from inside a pane, used by the skill
    instead of sourcing the file blind.
-3. T8: report upstream with a reproducer; keep the skill's fallback until
+2. T8: report upstream with a reproducer; keep the skill's fallback until
    a fixed AMQ release.
-4. T7 only if a real consumer needs it; orchestrators can already resend on
+3. T7 only if a real consumer needs it; orchestrators can already resend on
    a thread.
 
 ## Out of scope

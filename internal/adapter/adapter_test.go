@@ -278,16 +278,16 @@ func TestPlanDoesNotCoverAnotherOccupant(t *testing.T) {
 func TestAdoptHandleNeverHandsOverAnEarlierOccupantsHandle(t *testing.T) {
 	rec := WakerRecord{PaneID: "w1:p1", Handle: "claude", Cwd: "/repo/a", Agent: "claude"}
 	newcomer := AgentInfo{PaneID: "w1:p1", Agent: str("claude"), Cwd: "/repo/b"}
-	if got := AdoptHandle(newcomer, []AgentInfo{newcomer}, rec, true); got == "claude" {
+	if got := AdoptHandle(newcomer, []AgentInfo{newcomer}, rec, true, nil); got == "claude" {
 		t.Fatalf("newcomer took the earlier occupant's handle %q", got)
 	}
 	// The same agent resumed without its name keeps its handle.
 	resumed := AgentInfo{PaneID: "w1:p1", Agent: str("claude"), Cwd: "/repo/a"}
-	if got := AdoptHandle(resumed, []AgentInfo{resumed}, WakerRecord{PaneID: "w1:p1", Handle: "claude-7", Cwd: "/repo/a", Agent: "claude"}, true); got != "claude-7" {
+	if got := AdoptHandle(resumed, []AgentInfo{resumed}, WakerRecord{PaneID: "w1:p1", Handle: "claude-7", Cwd: "/repo/a", Agent: "claude"}, true, nil); got != "claude-7" {
 		t.Fatalf("resumed agent got %q", got)
 	}
 	// No record: plain kind-based naming.
-	if got := AdoptHandle(newcomer, []AgentInfo{newcomer}, WakerRecord{}, false); got != "claude" {
+	if got := AdoptHandle(newcomer, []AgentInfo{newcomer}, WakerRecord{}, false, nil); got != "claude" {
 		t.Fatalf("fresh agent got %q", got)
 	}
 }

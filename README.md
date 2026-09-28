@@ -241,7 +241,21 @@ reports unreadable sections through `errors` and exits nonzero; an unavailable
 spool inventory is `null`, not an empty map. A per-alias count of `-1` means the
 read failed. Full per-message end-to-end doctor tracing is not implemented.
 
+## Departed agents
+
+When an agent's pane closes or its process exits, its handle is reserved for
+24 hours (a tombstone under `<state>/tombstones/`): a new unnamed agent of the
+same kind gets another name, and the agent can come back under its own. After
+that, the next hook or reconcile moves the mailbox, unread mail included, to
+`<state>/archive/<handle>-<unix>/` and drops the handle from the amq agent
+list; archives older than 30 days are removed. Bridge aliases and handles in
+use are never touched.
+
 ## Known gaps
+
+- Mail sent to a handle after its mailbox was archived recreates the mailbox
+  (`amq send` only warns on unknown handles) and waits there with no waker.
+  Mailboxes of agents that left before this version are not collected.
 
 - Herdr's prompt success proves terminal submission, not agent consumption.
   The popup does not claim a drained receipt from a successful injection.

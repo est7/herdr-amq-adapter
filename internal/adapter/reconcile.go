@@ -133,14 +133,18 @@ func LiveHandles(recs []WakerRecord) []string {
 
 // AdoptHandle is the handle an unnamed agent in a pane is given: the
 // record's when it is the same occupant (Inherit), otherwise a kind-based
-// name. An earlier occupant's handle is never offered to a newcomer, even
-// when kind-based naming would land on it: its mailbox holds mail for that
-// agent.
-func AdoptHandle(a AgentInfo, live []AgentInfo, rec WakerRecord, exists bool) string {
+// name. An earlier occupant's handle, and a reserved handle (a departed
+// agent's, within its grace period), are never offered to a newcomer, even
+// when kind-based naming would land on them: their mailbox holds mail for
+// that agent.
+func AdoptHandle(a AgentInfo, live []AgentInfo, rec WakerRecord, exists bool, reserved []string) string {
 	prev, inherited := Inherit(rec, exists, a)
 	taken := TakenNames(live)
 	if exists && !inherited {
 		taken[rec.Handle] = true
+	}
+	for _, h := range reserved {
+		taken[h] = true
 	}
 	return ChooseHandle(a, taken, prev.Handle)
 }
