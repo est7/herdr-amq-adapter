@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 )
 
 const adapterRepo = "est7/herdr-amq-adapter"
@@ -262,4 +263,42 @@ func newestTag(lsRemote string) string {
 		return false
 	})
 	return all[len(all)-1].tag
+}
+
+// fileID tells a binary replaced at the same path (Herdr's install swap, a
+// rebuild) from the one a long-lived process started from.
+type fileID struct {
+	ino     uint64
+	size    int64
+	modNano int64
+}
+
+func binaryID(path string) (fileID, error) {
+	st, err := os.Stat(path)
+	if err != nil {
+		return fileID{}, err
+	}
+	id := fileID{size: st.Size(), modNano: st.ModTime().UnixNano()}
+	if sys, ok := st.Sys().(*syscall.Stat_t); ok {
+		id.ino = uint64(sys.Ino)
+	}
+	return id, nil
+}
+
+// applyPlan retires and adopts panes one by one. A failure in one pane is
+// reported and the rest still run: one bad record must not leave every
+// other agent unadopted.
+func applyPlan(stops, starts []string, stop, ensure func(string) error) error {
+	var errs []error
+	for _, p := range stops {
+		if err := stop(p); err != nil {
+			errs = append(errs, fmt.Errorf("stop %s: %w", p, err))
+		}
+	}
+	for _, p := range starts {
+		if err := ensure(p); err != nil {
+			errs = append(errs, fmt.Errorf("ensure %s: %w", p, err))
+		}
+	}
+	return errors.Join(errs...)
 }

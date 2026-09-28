@@ -325,6 +325,7 @@ func bridgeRun() error {
 	}
 	lastInventory := time.Time{}
 	markerSeen := markerTime(reloadMarker(e))
+	startedFrom, idErr := binaryID(e.self)
 	rs := runnerStatus{Version: version, PID: os.Getpid(), StartedAt: time.Now()}
 	noteErr := func(format string, args ...any) {
 		msg := fmt.Sprintf(format, args...)
@@ -336,6 +337,13 @@ func bridgeRun() error {
 			markerSeen = now
 			lastInventory = time.Time{}
 			fmt.Println("bridge run: reload requested")
+			// An update replaced the binary: exit cleanly (tunnels and the
+			// lock are released by the deferred cleanup) and let `bridge
+			// ensure`, which is waiting, start the new one.
+			if id, err := binaryID(e.self); idErr == nil && err == nil && id != startedFrom {
+				fmt.Println("bridge run: binary replaced; exiting for bridge ensure to restart it")
+				return nil
+			}
 		}
 		if time.Since(lastInventory) >= inventoryEvery {
 			for _, p := range benv.Peers {
@@ -563,7 +571,15 @@ func bridgeEnsure() error {
 			return err
 		}
 		fmt.Println("bridge run: reload requested")
-		return nil
+		if !runnerOutdated(e) {
+			return nil
+		}
+		// A runner from an older build exits on the reload when its binary
+		// was replaced; wait for it, then start this build.
+		if !waitRunnerExit(e, 5*tickEvery) {
+			fmt.Println("bridge run: the running instance is an older build and did not exit; restart it (it predates self-restart) with: pkill -f 'herdr-amq-adapter bridge run', then run the bridge-ensure action")
+			return nil
+		}
 	}
 	if err := os.MkdirAll(e.logs, 0o755); err != nil {
 		return err
@@ -585,6 +601,26 @@ func bridgeEnsure() error {
 	_ = cmd.Process.Release()
 	fmt.Printf("bridge run started pid=%d log=%s\n", pid, filepath.Join(e.logs, "bridge.log"))
 	return nil
+}
+
+// runnerOutdated reports whether the running instance's status names
+// another build than this one.
+func runnerOutdated(e env) bool {
+	b, err := os.ReadFile(statusPath(e))
+	if err != nil {
+		return false
+	}
+	var rs runnerStatus
+	return json.Unmarshal(b, &rs) == nil && rs.Version != "" && rs.Version != version
+}
+
+func waitRunnerExit(e env, limit time.Duration) bool {
+	for deadline := time.Now().Add(limit); time.Now().Before(deadline); time.Sleep(500 * time.Millisecond) {
+		if running, err := bridgeRunningChecked(e); err == nil && !running {
+			return true
+		}
+	}
+	return false
 }
 
 // bridgeStatus is the operator view: configuration, the runner's last

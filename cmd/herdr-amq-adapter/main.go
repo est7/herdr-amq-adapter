@@ -509,22 +509,20 @@ func runReconcile() error {
 		return adapter.DecideWake(st, adapter.ExpectedTarget(e.self, w.Handle, w.ArgvPane(), e.root)) == adapter.DecisionKeep
 	}
 	plan := adapter.Plan(live, wakers, current)
+	var stops, starts []string
 	for _, w := range plan.Stop {
-		if err := stop(e, w.PaneID); err != nil {
-			return err
-		}
+		stops = append(stops, w.PaneID)
 	}
 	for _, a := range plan.Start {
-		if err := ensure(e, a.PaneID); err != nil {
-			return err
-		}
+		starts = append(starts, a.PaneID)
 	}
+	planErr := applyPlan(stops, starts, func(p string) error { return stop(e, p) }, func(p string) error { return ensure(e, p) })
 	fmt.Printf("reconcile: live=%d stopped=%d started=%d\n", len(live), len(plan.Stop), len(plan.Start))
 	collectGarbage(e)
 	if err := bridgeEnsure(); err != nil {
-		return fmt.Errorf("wakers reconciled, but bridge: %w", err)
+		return errors.Join(planErr, fmt.Errorf("bridge: %w", err))
 	}
-	return nil
+	return planErr
 }
 
 const (
