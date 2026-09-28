@@ -1,6 +1,6 @@
 ---
 name: herdr-amq-adapter
-description: Message other coding agents running in Herdr panes over AMQ. Use when you see "AMQ doorbell … (you are <name> in Herdr; first: source …)", when the user asks you to send, ask, or reply to another agent in Herdr (on this machine or a saved SSH machine), or when you need your AMQ identity or delivery status. Requires HERDR_ENV=1.
+description: Message other coding agents running in Herdr panes over AMQ. Use when you see "AMQ doorbell … (you are <name> in Herdr; first: source …)", when the user asks you to send, ask, or reply to another agent in Herdr (on this machine or a saved SSH machine), when the user asks you to start another agent and hand it work ("开个 codex 审一下", "spin up a reviewer"), or when you need your AMQ identity or delivery status. Requires HERDR_ENV=1.
 ---
 
 # herdr-amq-adapter
@@ -8,8 +8,9 @@ description: Message other coding agents running in Herdr panes over AMQ. Use wh
 Every agent in a Herdr pane is reachable over AMQ under its Herdr name
 (`claude`, `codex`, `claude-2`, or a name the user gave it). The Herdr plugin
 `est7.amq-adapter` owns one AMQ root per machine, provisions your mailbox,
-and wakes you with a prompt when mail arrives. You launch and configure
-nothing.
+and wakes you with a prompt when mail arrives. You never launch or configure
+the plugin's pieces (see Rules); starting a peer agent to talk to is yours,
+under "Start a peer".
 
 This is plain AMQ. It is **not** an orch worker context: do not use
 `orch worker amq`, `amq coop`, or any `--project` / `--session` routing.
@@ -46,6 +47,10 @@ Read every message it prints and act on it. Do not re-drain in a loop; a
 new doorbell arrives for new mail, and a doorbell that finds nothing is
 normal (it announced mail you already drained).
 
+Loaded with no doorbell and no request (the user just invoked this skill):
+source, drain once, run `amq who --json`, report what you found, and ask
+whom to message about what.
+
 ## Replying
 
 Reply when the message asks a question, requests work, or the protocol
@@ -77,7 +82,12 @@ source … && amq who --json        # known handles; remote aliases are routes
 source … && amq send --to codex --subject "<short subject>" --body "<request>"
 ```
 
-Handles are the names in Herdr's agent sidebar. Agents on a paired SSH
+Handles are the names in Herdr's agent sidebar. `who` lists every
+registered mailbox, not only live agents: a local handle with
+`"active": true` has a live waker; the rest are departed agents (reserved
+for 24 hours, see README "Departed agents") or mailboxes from before
+collection existed. Do not hand work to an inactive local handle; start a
+peer instead. Agents on a paired SSH
 machine appear under `<machine>-<agent>` (`heping-codex`), and that machine
 sees you as `<your machine>-<you>`; messaging them is the same `amq send`.
 A send queues the message; the plugin attempts delivery and wakes you when
@@ -91,11 +101,34 @@ Multiple recipients use `amq send --to a,b`. Remote fan-out preserves the
 message id, thread, and refs while each destination takes its turn through
 the spool; recipients need not receive it simultaneously.
 
+## Start a peer
+
+When the user asks for another agent ("开个 codex 审一下"), start one in a
+pane, then message it like any peer.
+
+1. Place it. Same project directory as an existing pane: split that pane,
+   `herdr pane split <id> --direction right --cwd <dir> --no-focus`. A
+   different project directory: open a new tab in that workspace,
+   `herdr tab create --workspace <id> --cwd <dir> --label <project>`, and
+   use its root pane.
+2. Start it: `herdr agent start <name> --kind codex --pane <new-id>`. The
+   name becomes the AMQ handle verbatim. Pick one that `amq who` does not
+   list: a departed agent's mailbox keeps its unread mail for 24 hours, and
+   an agent started under that name inherits it and drains it along with
+   your brief.
+3. Confirm adoption before sending: the plugin has written
+   `~/.config/herdr/plugins/config/est7.amq-adapter/panes/<new-id with : as _>.env`
+   and `amq who` shows the handle `"active": true`. Before that, no waker
+   watches the mailbox, so a send has nothing to ring the doorbell.
+4. Send the brief. `herdr agent wait <name> --until working --timeout 60000`
+   shows the doorbell woke it; that is not proof it drained or acted.
+
+For another machine, read `references/remote-machines.md` first.
+
 For a multi-round exchange you drive yourself (adversarial review with a
 fix loop, single audit, test-hardening attack, a debate between peers, or
 delegating separate tasks to workers and tracking their reports), read
-`references/patterns.md`. To start or inspect an agent on another
-machine (`herdr --machine`), read `references/remote-machines.md`.
+`references/patterns.md`.
 
 ## Inspect delivery status
 

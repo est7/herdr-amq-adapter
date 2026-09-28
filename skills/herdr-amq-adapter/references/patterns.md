@@ -9,8 +9,10 @@ thread contract); the mechanics are plain AMQ.
 ## Coordinator duties (every pattern)
 
 - **Brief first.** The peer sees only the mail. Put the task, the tree
-  location (cwd, branch, `git diff` range), and the role prompt in the
-  body. Nothing in your context reaches them.
+  location (cwd, branch, `git diff` range), the constraints (what the
+  peer must not change: edits, commits, pushes, branch switches; checks
+  to run), and the role prompt in the body. Nothing in your context
+  reaches them.
 - **One thread per exchange.** Open with `amq send`; every later turn
   replies to the last message (`amq reply --id`, or `amq send --thread`
   when reply reports `message not found`) so the thread stays intact and

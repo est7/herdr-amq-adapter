@@ -13,7 +13,7 @@ list the labels and ask. Then put the same prefix on every Herdr command:
 ```bash
 herdr --machine heping workspace list
 herdr --machine heping pane list
-herdr --machine heping agent start codex --kind codex --pane <id>
+herdr --machine heping agent start <name> --kind codex --pane <id>
 ```
 
 Read ids from that machine's responses; local ids, `HERDR_PANE_ID`, and
@@ -28,13 +28,14 @@ directory is set when the pane is created; `agent start` inherits it.
 
 ## Choose pane or tab
 
-Placement follows the project, on any machine:
+Placement and naming follow SKILL.md "Start a peer"; prefix every Herdr
+command with `--machine <label>` and use that machine's ids, and check the
+name against `<label>-<name>` in your `amq who`.
 
-- same project directory as an existing pane: split that pane,
-  `pane split <id> --cwd <dir> --no-focus`;
-- a different project directory: open a new tab in that workspace,
-  `tab create --workspace <id> --cwd <dir> --label <project>`, and start the
-  agent in its root pane.
+The adoption check differs: the pane env file and `"active"` live on that
+machine, not here. Wait for the alias `<label>-<name>` to appear in your
+`amq who` (inventory syncs every 30 seconds) before sending; an alias is a
+route, not proof the agent is online.
 
 ## Failure signals
 
