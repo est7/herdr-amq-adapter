@@ -64,9 +64,10 @@ Requirements, all installed or checked by step 1:
 | what | version | notes |
 |---|---|---|
 | Herdr | ≥ 0.9.1 | plugin events, `agent prompt`, status popup |
-| `amq` | 0.81.1 tested | installed into `~/.local/bin` when missing; an older one gets a warning (upgrade it, then run the reconcile action) |
-| `amq-bridge` | same release as `amq` | installed with it; only used across machines |
+| `amq` | ≥ 0.80.1 | the latest release is installed into `~/.local/bin` when missing (`AMQ_VERSION=x.y.z` picks one); an installed one is kept, and one older than 0.80.1 gets a warning |
+| `amq-bridge` | the release of the `amq` in use | installed with it when missing; only used across machines |
 | `curl` or `wget`, `shasum` or `sha256sum` | any | to download and check the binaries |
+| Go | ≥ `go.mod`'s version | only to build from source (development checkouts) |
 
 Actions (`herdr plugin action invoke est7.amq-adapter.<id>`): `configure`,
 `reconcile`, `status`, `bridge-status`, `bridge-ensure`, `dashboard`.

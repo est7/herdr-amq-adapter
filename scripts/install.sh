@@ -6,21 +6,22 @@
 #    herdr-plugin.toml's `version`, checked against the release's SHA256SUMS.
 #    A checkout that is not that release's commit (a development checkout,
 #    local changes) builds from source with Go instead.
-# 2. amq and amq-bridge: when amq is not installed, the pinned AMQ release
+# 2. amq and amq-bridge: when amq is not installed, the latest AMQ release
 #    is downloaded into ~/.local/bin, checked against its checksums.txt.
-#    An installed amq is never replaced; one older than the tested version
-#    gets a warning.
+#    An installed amq is never replaced; one older than AMQ_MIN gets a
+#    warning. amq-bridge comes from the same release as the amq in use.
 # 3. ~/.local/bin/herdr-amq-adapter links to the installed binary.
 #
 #   HERDR_AMQ_ADAPTER_BUILD=source         always build from source
 #   HERDR_AMQ_ADAPTER_DOWNLOAD_URL=<url>   fetch <url>/v<version>/<asset>
 #                                          instead of the GitHub release
+#   AMQ_VERSION=<x.y.z>                    install this AMQ release, not the latest
 #   AMQ_DOWNLOAD_URL=<url>                 fetch <url>/v<amq>/<asset> for AMQ
 set -u
 
 cd "$(dirname "$0")/.." || exit 1
 
-AMQ_VERSION=0.81.1 # the AMQ release this adapter is tested with
+AMQ_MIN=0.80.1 # the oldest AMQ this adapter works with
 AMQ_REPO=avivsinai/agent-message-queue
 ADAPTER_REPO=est7/herdr-amq-adapter
 BIN_DIR=${XDG_BIN_HOME:-$HOME/.local/bin}
@@ -164,19 +165,27 @@ fetch_amq_tool() {
   say "installed $name $v to $BIN_DIR/$name"
 }
 
+# latest_amq: the newest AMQ release's version, from GitHub.
+latest_amq() {
+  fetch "https://api.github.com/repos/$AMQ_REPO/releases/latest" "$tmp/amq-latest.json" || return 1
+  sed -n 's/.*"tag_name": *"v\{0,1\}\([0-9][0-9.]*\)".*/\1/p' "$tmp/amq-latest.json" | head -n 1
+}
+
 install_amq() {
   if amq=$(find_amq); then
     have=$("$amq" --version 2>/dev/null | head -n 1 | sed 's/^[^0-9]*//')
-    if [ -n "$have" ] && older "$have" "$AMQ_VERSION"; then
-      say "warning: $amq is AMQ $have; this adapter is tested with $AMQ_VERSION. Upgrade it (brew upgrade amq, or its release page) and run the reconcile action"
+    if [ -n "$have" ] && older "$have" "$AMQ_MIN"; then
+      say "warning: $amq is AMQ $have; this adapter needs $AMQ_MIN or newer. Upgrade it (brew upgrade amq, or its release page) and run the reconcile action"
     fi
   else
-    have=$AMQ_VERSION
-    fetch_amq_tool amq "$AMQ_VERSION"
+    have=${AMQ_VERSION:-$(latest_amq)}
+    [ -n "$have" ] || die "amq is not installed and the latest AMQ release could not be found; install AMQ $AMQ_MIN or newer (https://github.com/$AMQ_REPO/releases)"
+    fetch_amq_tool amq "$have"
   fi
-  # amq-bridge (cross-machine mail) must come from the same AMQ release.
+  # amq-bridge (cross-machine mail) comes from the same AMQ release as amq.
   if ! command -v amq-bridge >/dev/null 2>&1 && [ ! -x "$BIN_DIR/amq-bridge" ] && [ -z "${AMQ_BRIDGE_BIN:-}" ]; then
-    fetch_amq_tool amq-bridge "${have:-$AMQ_VERSION}"
+    [ -n "$have" ] || die "cannot tell which AMQ release $amq is, to install the matching amq-bridge"
+    fetch_amq_tool amq-bridge "$have"
   fi
 }
 
