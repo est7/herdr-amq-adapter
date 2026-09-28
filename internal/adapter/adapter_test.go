@@ -291,3 +291,23 @@ func TestAdoptHandleNeverHandsOverAnEarlierOccupantsHandle(t *testing.T) {
 		t.Fatalf("fresh agent got %q", got)
 	}
 }
+
+// The inventory a peer routes by lists only handles whose agent is live in
+// Herdr; a record left behind by an agent that is gone (a Herdr server
+// restart reuses and renumbers pane ids) is not a route.
+func TestLiveInventory(t *testing.T) {
+	recs := []WakerRecord{
+		{PaneID: "wV:p1", Handle: "codex", Generation: "g"},  // stale: no such agent
+		{PaneID: "wX:p2", Handle: "claude", Generation: "g"}, // live
+		{PaneID: "wX:p3", Handle: "parked"},                  // parked: never a route
+	}
+	live := []AgentInfo{{PaneID: "wX:p2", Name: str("claude")}, {PaneID: "wX:p9", Name: str("other")}}
+	if got := LiveInventory(recs, live, true); !reflect.DeepEqual(got, []string{"claude"}) {
+		t.Fatalf("with Herdr: got %v", got)
+	}
+	// Without Herdr (a bare SSH session that cannot reach it) the records
+	// are all there is.
+	if got := LiveInventory(recs, nil, false); !reflect.DeepEqual(got, []string{"claude", "codex"}) {
+		t.Fatalf("without Herdr: got %v", got)
+	}
+}

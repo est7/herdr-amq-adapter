@@ -1,5 +1,7 @@
 package adapter
 
+import "sort"
+
 // AgentInfo is the subset of Herdr's agent_info this adapter needs.
 type AgentInfo struct {
 	PaneID      string  `json:"pane_id"`
@@ -152,4 +154,21 @@ func AdoptHandle(a AgentInfo, live []AgentInfo, rec WakerRecord, exists bool, re
 		taken[h] = true
 	}
 	return ChooseHandle(a, taken, prev.Handle)
+}
+
+// LiveInventory is what this machine tells peers they can route to: the
+// handles whose records own a waker (LiveHandles) and, when Herdr could be
+// asked, whose agent is live under that name. A record an agent left behind
+// (its pane gone, e.g. after a Herdr server restart renumbered the panes)
+// is not a route. Without Herdr the records are all there is.
+func LiveInventory(recs []WakerRecord, live []AgentInfo, herdrKnown bool) []string {
+	names := TakenNames(live)
+	var out []string
+	for _, h := range LiveHandles(recs) {
+		if !herdrKnown || names[h] {
+			out = append(out, h)
+		}
+	}
+	sort.Strings(out)
+	return out
 }

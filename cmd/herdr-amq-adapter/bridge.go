@@ -151,17 +151,21 @@ func runPeer(args []string) error {
 }
 
 // localAgents is this plugin's own inventory: the handles whose wakers it
-// currently owns. Parked records (agent released) are excluded so a peer
-// never routes mail to a mailbox nobody reads. It needs no Herdr access, so
-// it also works over a bare SSH session.
+// owns and whose agent Herdr lists as live, so a peer never routes mail to
+// a mailbox nobody reads. When Herdr cannot be asked (a bare SSH session
+// without its server), the records alone are the inventory.
 func localAgents(e env) ([]string, error) {
 	recs, err := e.store.List()
 	if err != nil {
 		return nil, err
 	}
-	out := adapter.LiveHandles(recs)
-	sort.Strings(out)
-	return out, nil
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	live, herr := e.herdr.AgentList(ctx)
+	if herr != nil {
+		fmt.Fprintln(os.Stderr, "herdr-amq-adapter: inventory from records only:", herr)
+	}
+	return adapter.LiveInventory(recs, live, herr == nil), nil
 }
 
 func bridgeEnv(e env) (bridge.Env, bool, error) {
