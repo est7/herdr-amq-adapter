@@ -29,7 +29,7 @@ mislabel it. orch does exactly this, and herdr-projects keeps reports,
 | T5 | delivery-state facts per message id | enqueued → doorbell accepted / deferred / retried / invalid → drained (receipt) → DLQ; "injected" never counts as "drained" | have, AMQ-owned: `notification-attempts.jsonl` per agent, `amq trace <id>`, `amq doctor --ops --json` (unread, DLQ, attempts). It records a deferral only as "exit status 1" |
 | T6 | delivery reason | why the injector deferred or failed (draft_in_box, trust_screen, server_not_running, …) | have: `<state>/inject/<handle>.jsonl` (bounded, rotated), shown per agent in the status popup. An upstream `AMQ_INJECT_DETAIL` was judged unlikely to land |
 | T7 | same-thread redeliver | resend the same body on the same thread with a fresh id so the wake fires again (orch's nudge for undrained mail) | gap; `amq send --thread` already allows it by hand |
-| T8 | cross-machine reply | `amq reply --id` answers a bridged message on its thread | gap: AMQ 0.80.1 stores bridged mail under a transfer file name; agents fall back to `send --thread`. Upstream fix |
+| T8 | cross-machine reply | `amq reply --id` answers a bridged message on its thread | have: AMQ ≥ 0.81.2 resolves the header id of a bridged file |
 | S1 | identity binding | the pane → (handle, root) mapping an agent sources | have: identity file keyed by pane id |
 | S2 | occupant check | a record is inherited only by an agent with the same cwd and kind (pane ids restart after a Herdr server restart); an earlier occupant's handle is never given to a newcomer | have (`SameOccupant`, `Inherit`, `AdoptHandle`) |
 | S3 | verified whoami | resolve the calling pane, check its live agent name equals the recorded handle, print the identity; refuse on mismatch | gap; orch ADR 0007 rejects identity taken from ambient files or env alone |
@@ -55,9 +55,7 @@ tombstones existed are not collected.
 
 1. S3: `herdr-amq-adapter whoami` from inside a pane, used by the skill
    instead of sourcing the file blind.
-2. T8: report upstream with a reproducer; keep the skill's fallback until
-   a fixed AMQ release.
-3. T7 only if a real consumer needs it; orchestrators can already resend on
+2. T7 only if a real consumer needs it; orchestrators can already resend on
    a thread.
 
 ## Out of scope

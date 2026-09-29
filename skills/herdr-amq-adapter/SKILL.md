@@ -62,18 +62,8 @@ file:
 source … && amq reply --id <message-id> --body "<your answer>"
 ```
 
-AMQ 0.80.1 stores bridged mail under a transfer file name, so `amq reply`
-with its header id can answer `message not found`. For a known bridged
-message, reply in the same thread instead, quoting the sender and thread
-printed by drain:
-
-```bash
-source … && amq send --to <sender> --thread <thread> --body "<your answer>"
-```
-
-Both forms keep the thread intact; `amq thread --id <thread>` shows it.
-For a local message, check the sourced identity and drained id before
-treating `message not found` as a cross-machine case.
+This works the same for mail from another machine. The reply keeps the
+thread intact; `amq thread --id <thread>` shows it.
 
 ## Find peers and start a conversation
 

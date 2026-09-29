@@ -14,9 +14,8 @@ thread contract); the mechanics are plain AMQ.
   to run), and the role prompt in the body. Nothing in your context
   reaches them.
 - **One thread per exchange.** Open with `amq send`; every later turn
-  replies to the last message (`amq reply --id`, or `amq send --thread`
-  when reply reports `message not found`) so the thread stays intact and
-  `amq thread` shows the whole history.
+  replies to the last message (`amq reply --id`) so the thread stays
+  intact and `amq thread` shows the whole history.
 - **Verdict line.** Ask the peer to start their reply with one of the
   exact markers named in the pattern (for example `verdict: approve`).
   Read the marker, then the findings. A reply without a marker is a

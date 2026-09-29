@@ -21,7 +21,7 @@ set -u
 
 cd "$(dirname "$0")/.." || exit 1
 
-AMQ_MIN=0.80.1 # the oldest AMQ this adapter works with
+AMQ_MIN=0.81.2 # the oldest AMQ this adapter works with
 AMQ_REPO=avivsinai/agent-message-queue
 ADAPTER_REPO=est7/herdr-amq-adapter
 BIN_DIR=${XDG_BIN_HOME:-$HOME/.local/bin}

@@ -65,7 +65,7 @@ Requirements, all installed or checked by step 1:
 | what | version | notes |
 |---|---|---|
 | Herdr | ≥ 0.9.1 | plugin events, `agent prompt`, status popup |
-| `amq` | ≥ 0.80.1 | the latest release is installed into `~/.local/bin` when missing (`AMQ_VERSION=x.y.z` picks one); an installed one is kept, and one older than 0.80.1 gets a warning |
+| `amq` | ≥ 0.81.2 | the latest release is installed into `~/.local/bin` when missing (`AMQ_VERSION=x.y.z` picks one); an installed one is kept, and one older than 0.81.2 gets a warning |
 | `amq-bridge` | the release of the `amq` in use | installed with it when missing; only used across machines |
 | `curl` or `wget`, `shasum` or `sha256sum` | any | to download and check the binaries |
 | Go | ≥ `go.mod`'s version | only to build from source (development checkouts) |
@@ -212,7 +212,7 @@ drives it:
   route inventories follow agent arrivals and departures. Existing mailbox
   data is retained.
 
-Broadcasts preserve the original message id, thread, and refs. AMQ 0.80.1's
+Broadcasts preserve the original message id, thread, and refs. AMQ's
 spool has one filename per sender/message id, so each destination gets a
 successive turn at that slot. The adapter records exact enqueued bytes under
 `amq-root/bridge/forwarded/<sender>/<id>__<escaped-destination>.md` before
@@ -246,11 +246,10 @@ Host aliases (`--me`, `--label`/`--host`) are bridge identities: they name
 the Ed25519 keys both sides trust and prefix every alias mailbox. Changing
 one means pairing again.
 
-Replies: a bridged message is stored under a transfer file name, and amq
-0.80 resolves `amq reply --id` by file name, so replying to a
-`<host>-<agent>` sender needs `amq send --to <sender> --thread <thread>`
-instead. Thread ids survive the hop, so `amq thread --id` shows the whole
-exchange on both machines.
+Replies: `amq reply --id` answers a bridged message by the id drain shows
+(AMQ 0.81.2 resolves it although the file is stored under a transfer name).
+Thread ids survive the hop, so `amq thread --id` shows the whole exchange on
+both machines.
 
 ## Status popup
 

@@ -16,7 +16,7 @@ import (
 // Two roots on one machine, the real amq and amq-bridge binaries, and the
 // plugin's own rendezvous behind httptest: the full data plane as it runs
 // between machines, minus SSH. Covers signed enqueue/push/apply, thread and
-// address preservation, a reply through the symmetric alias, idempotent
+// address preservation, `amq reply --id` to a bridged message, idempotent
 // replay, and the crash window between enqueue and the alias-mailbox move.
 func TestTwoHostsExchangeOverRealBridge(t *testing.T) {
 	amq, err := exec.LookPath("amq")
@@ -108,9 +108,11 @@ func TestTwoHostsExchangeOverRealBridge(t *testing.T) {
 		t.Fatalf("heping replay tick did work: %+v", rep)
 	}
 
-	// 4. codex replies in the same thread through the symmetric alias.
-	run(t, amq, "--no-update-check", "send", "--root", heping.root, "--me", "codex", "--to", "mac-claude",
-		"--thread", "p2p/claude__heping-codex", "--body", "pong from heping")
+	// 4. codex replies by the header id drain shows, although the file is
+	// stored under its transfer name (AMQ >= 0.81.2); the reply goes back
+	// through the symmetric alias in the same thread.
+	run(t, amq, "--no-update-check", "reply", "--root", heping.root, "--me", "codex", "--id", sentID,
+		"--body", "pong from heping")
 	if rep = Tick(ctx, heping.env); len(rep.Errors) != 0 || len(rep.Pushed) != 1 {
 		t.Fatalf("heping reply tick: %+v", rep)
 	}

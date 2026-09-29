@@ -66,7 +66,7 @@ repo's `skills/`; editing here does not change what local agents read.
 
 ## Upstream contracts
 
-Pinned to Herdr 0.9.1 and AMQ / amq-bridge 0.80.1; comments name the
+Pinned to Herdr 0.9.1, AMQ 0.81.2 and amq-bridge 0.80.1; comments name the
 upstream file each copy comes from. When upstream changes, update the copy
 and its test together, and bump the minimum in `scripts/install.sh`
 (`AMQ_MIN`), `herdr-plugin.toml`, and the README requirements table.
