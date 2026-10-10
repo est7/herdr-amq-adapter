@@ -1,6 +1,7 @@
 ---
 name: herdr-amq-adapter
-description: Message other coding agents running in Herdr panes over AMQ. Use when you see "AMQ doorbell … (you are <name> in Herdr; first: source …)", when the user asks you to send, ask, or reply to another agent in Herdr (on this machine or a saved SSH machine), when the user asks you to start another agent and hand it work ("开个 codex 审一下", "spin up a reviewer"), or when you need your AMQ identity or delivery status. Requires HERDR_ENV=1.
+description: >-
+  Message other coding agents running in Herdr panes over AMQ. Use when you see "AMQ doorbell … (you are <name> in Herdr; first: source …)", when the user asks you to send, ask, or reply to another agent in Herdr (on this machine or a saved SSH machine), when the user asks you to start another agent and hand it work ("开个 codex 审一下", "spin up a reviewer"), or when you need your AMQ identity or delivery status. Requires HERDR_ENV=1.
 ---
 
 # herdr-amq-adapter
