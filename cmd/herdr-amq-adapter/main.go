@@ -212,6 +212,11 @@ func runHook() error {
 	if err != nil {
 		return err
 	}
+	if act.Kind == adapter.ActionKick {
+		// Not a lifecycle transition: no state-dir lock and no gc, but the
+		// same server-ownership rule applies (checked inside, read-only).
+		return kick(e, act.PaneID)
+	}
 	unlock, err := e.store.Lock()
 	if err != nil {
 		return err
@@ -232,6 +237,54 @@ func runHook() error {
 	}
 	collectGarbage(e)
 	return err
+}
+
+// kickPayload is the doorbell text amq hands the injector; Notice appends
+// the identity hint, so a kicked doorbell reads exactly like a waker one.
+const kickPayload = "AMQ doorbell run amq drain --include-body then act on it"
+
+// kick re-delivers a doorbell when an agent leaves a state that deferred
+// delivery while mail is still waiting. amq retries a deferred cohort on its
+// own backoff (up to 2m) and offers no external trigger short of new mail, so
+// without this an agent that was blocked on a question sits idle on unread
+// mail. It reads the pane's record and delivers through the same path as
+// inject; a doorbell that races amq's own retry finds an already-drained
+// inbox, which the skill tells agents to treat as normal. A parked record
+// (no waker) is skipped.
+func kick(e env, paneID string) error {
+	recs, err := e.store.List()
+	if err != nil {
+		return err
+	}
+	handle := ""
+	for _, r := range recs {
+		if r.PaneID == paneID {
+			handle = r.Handle
+		}
+	}
+	if handle == "" {
+		fmt.Printf("kick pane=%s: skip (no waker record)\n", paneID)
+		return nil
+	}
+	home, _ := os.UserHomeDir()
+	_, configDir := pluginDirs(home)
+	deliver := func(rec adapter.WakerRecord) adapter.Outcome {
+		id := adapter.Identity{PaneID: paneID, Handle: rec.Handle, Root: rec.Root}
+		text := adapter.Notice(kickPayload, id, adapter.IdentityPath(configDir, paneID))
+		out, _ := adapter.HerdrFromEnv().Deliver(rec.Handle, text, promptTimeout)
+		return out
+	}
+	v, out, err := adapter.KickOnce(e.stateDir, handle, os.Getenv("HERDR_SOCKET_PATH"), paneID, e.store.List, deliver, time.Now)
+	if err != nil {
+		return err
+	}
+	if !v.Kick {
+		// Status changes are frequent; a refusal is logged, not an error.
+		fmt.Printf("kick pane=%s: skip (%s)\n", paneID, v.Reason)
+		return nil
+	}
+	fmt.Printf("kick pane=%s handle=%s progress=%s %s\n", paneID, handle, out.Progress, out.Code)
+	return nil
 }
 
 // move re-keys a waker record after `herdr pane move`. The waker itself keeps

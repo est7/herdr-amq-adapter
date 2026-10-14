@@ -20,6 +20,10 @@ on = "pane.agent_detected"
 command = ["bin/herdr-amq-adapter", "hook"]
 
 [[events]]
+on = "pane.agent_status_changed"
+command = ["bin/herdr-amq-adapter", "hook"]
+
+[[events]]
 on = "pane.closed"
 command = ["bin/herdr-amq-adapter", "hook"]
 

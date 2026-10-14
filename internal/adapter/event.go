@@ -67,6 +67,10 @@ const (
 	// writes an identity file for the new id (the old one stays: the moved
 	// process still sees its original HERDR_PANE_ID).
 	ActionMove
+	// ActionKick re-delivers a doorbell for mail already waiting: the agent
+	// just left a state that deferred delivery (Herdr's agent_blocked), and
+	// amq's own retry loop would otherwise sit out its backoff (up to 2m).
+	ActionKick
 )
 
 func (k ActionKind) String() string {
@@ -79,6 +83,8 @@ func (k ActionKind) String() string {
 		return "park"
 	case ActionMove:
 		return "move"
+	case ActionKick:
+		return "kick"
 	default:
 		return "none"
 	}
@@ -92,8 +98,10 @@ type Action struct {
 	Reason         string
 }
 
-// Decide maps a Herdr event to an adapter action. Only agent appearance and
-// pane/agent departure matter; status changes are left to amq's own retry loop.
+// Decide maps a Herdr event to an adapter action. Agent appearance and
+// pane/agent departure drive the waker lifecycle; a status change into a
+// deliverable state (idle, working, done) kicks a doorbell for mail that a
+// blocked agent left waiting, instead of leaving it to amq's retry backoff.
 //
 // Herdr serialises EventKind in the envelope as snake_case ("pane_exited")
 // while manifests and HERDR_PLUGIN_EVENT use the dotted form ("pane.exited");
@@ -114,6 +122,16 @@ func Decide(ev Event) Action {
 			return Action{ActionNone, ev.Data.PaneID, "", "move without id change"}
 		}
 		return Action{ActionMove, ev.Data.PaneID, ev.Data.PreviousPaneID, "pane moved"}
+	case "pane.agent.status.changed":
+		if ev.Data.AgentStatus == nil {
+			return Action{ActionNone, ev.Data.PaneID, "", "status change without status"}
+		}
+		switch *ev.Data.AgentStatus {
+		case "idle", "working", "done":
+			return Action{ActionKick, ev.Data.PaneID, "", "agent " + *ev.Data.AgentStatus}
+		default:
+			return Action{ActionNone, ev.Data.PaneID, "", "agent " + *ev.Data.AgentStatus}
+		}
 	default:
 		return Action{ActionNone, ev.Data.PaneID, "", "unhandled event " + ev.Event}
 	}

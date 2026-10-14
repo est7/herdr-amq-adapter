@@ -21,7 +21,12 @@ func TestDecide(t *testing.T) {
 		{"detected-wire", `{"event":"pane_agent_detected","data":{"pane_id":"w1:p2","workspace_id":"w1","agent":"claude"}}`, ActionEnsure},
 		{"exited-wire", `{"event":"pane_exited","data":{"pane_id":"w1:p2","workspace_id":"w1"}}`, ActionStop},
 		{"closed-wire", `{"event":"pane_closed","data":{"pane_id":"w1:p2","workspace_id":"w1"}}`, ActionStop},
-		{"status", `{"event":"pane.agent_status_changed","data":{"pane_id":"w1:p2","workspace_id":"w1","agent_status":"idle"}}`, ActionNone},
+		{"status-idle", `{"event":"pane.agent_status_changed","data":{"pane_id":"w1:p2","workspace_id":"w1","agent_status":"idle"}}`, ActionKick},
+		{"status-working-wire", `{"event":"pane_agent_status_changed","data":{"pane_id":"w1:p2","workspace_id":"w1","agent_status":"working"}}`, ActionKick},
+		{"status-done", `{"event":"pane.agent_status_changed","data":{"pane_id":"w1:p2","workspace_id":"w1","agent_status":"done"}}`, ActionKick},
+		{"status-blocked", `{"event":"pane.agent_status_changed","data":{"pane_id":"w1:p2","workspace_id":"w1","agent_status":"blocked"}}`, ActionNone},
+		{"status-unknown", `{"event":"pane.agent_status_changed","data":{"pane_id":"w1:p2","workspace_id":"w1","agent_status":"unknown"}}`, ActionNone},
+		{"status-missing", `{"event":"pane.agent_status_changed","data":{"pane_id":"w1:p2","workspace_id":"w1"}}`, ActionNone},
 	}
 	for _, c := range cases {
 		ev, err := ParseEvent(c.raw)
