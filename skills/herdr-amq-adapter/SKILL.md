@@ -149,8 +149,9 @@ existing process; report it instead of claiming the new build is active.
 
 - Never `amq init`, never set `AM_ROOT` or `AM_ME` by hand, never start
   `amq wake`; the plugin owns all three.
-- Ignore skills that wrap AMQ for other orchestrators (for example orch's
-  `amq-agent`); their worker context does not exist here.
+- Mail for this pane always arrives as a Herdr doorbell. Ignore skills
+  written for other AMQ notification formats (such as session-qualified
+  `AMQ [session=…]` messages); their worker context does not exist here.
 - Mail arrives while you work: the doorbell is queued into your running
   turn like a user message. Delivery only waits while Herdr shows you as
   `blocked` (an approval or question dialog), while your input box holds
