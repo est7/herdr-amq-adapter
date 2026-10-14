@@ -1,7 +1,12 @@
 ---
 name: herdr-amq-adapter
 description: >-
-  Message other coding agents running in Herdr panes over AMQ. Use when you see "AMQ doorbell … (you are <name> in Herdr; first: source …)", when the user asks you to send, ask, or reply to another agent in Herdr (on this machine or a saved SSH machine), when the user asks you to start another agent and hand it work ("开个 codex 审一下", "spin up a reviewer"), or when you need your AMQ identity or delivery status. Requires HERDR_ENV=1.
+  Talk to other coding agents inside Herdr (HERDR_ENV=1) over AMQ. Use when an "AMQ doorbell … (you
+  are <name> in Herdr; first: source …)" arrives; when the user asks you to send, ask, or reply to
+  another agent in Herdr, on this machine or a paired SSH machine; when the user asks you to start a
+  peer agent and hand it work ("开个 codex 审一下", "spin up a reviewer"); when you drive a
+  multi-round exchange with peers (review loop, audit, debate, delegation); or when you need your
+  AMQ identity or delivery status. Outside Herdr this skill does not apply.
 ---
 
 # herdr-amq-adapter
@@ -13,9 +18,10 @@ and wakes you with a prompt when mail arrives. You never launch or configure
 the plugin's pieces (see Rules); starting a peer agent to talk to is yours,
 under "Start a peer".
 
-This is plain AMQ. It is **not** an orch worker context: do not use
-`orch worker amq`, `amq coop`, or any `--project` / `--session` routing.
-Bare `amq` with the sourced identity is the whole protocol.
+This is plain AMQ: bare `amq` with the sourced identity is the whole
+protocol. `amq coop`, `--project` / `--session` routing, wrapper CLIs, and
+AMQ skills written for other environments do not apply inside Herdr; their
+worker context does not exist here.
 
 ## Load your identity first
 
@@ -136,7 +142,9 @@ and last successful inventory sync, runner freshness, relay reachability,
 alias/spool backlog, quarantine, and read errors. An unknown sync time or
 an unreadable queue is not proof of a healthy or empty queue.
 
-For command output, run `herdr plugin action invoke est7.amq-adapter.bridge-status`.
+For a text report, run `herdr plugin action invoke est7.amq-adapter.bridge-status`;
+the invocation returns at once, and the report lands in the plugin log:
+`herdr plugin log list --plugin est7.amq-adapter --limit 1` (its `stdout`).
 For JSON, find `plugin_root` in `herdr plugin list --json` and invoke
 `<plugin_root>/bin/herdr-amq-adapter bridge status --json`; inspect `errors`
 and the exit code. `status-popup --once` on that binary prints one snapshot.
@@ -149,9 +157,6 @@ existing process; report it instead of claiming the new build is active.
 
 - Never `amq init`, never set `AM_ROOT` or `AM_ME` by hand, never start
   `amq wake`; the plugin owns all three.
-- Mail for this pane always arrives as a Herdr doorbell. Ignore skills
-  written for other AMQ notification formats (such as session-qualified
-  `AMQ [session=…]` messages); their worker context does not exist here.
 - Mail arrives while you work: the doorbell is queued into your running
   turn like a user message. Delivery only waits while Herdr shows you as
   `blocked` (an approval or question dialog), while your input box holds
